@@ -99,4 +99,3 @@ def exchange_rt(refresh_token,client,opener=None):
         'expires_in':int(expires)}
     if isinstance(data.get('id_token'),str) and data['id_token']:token['id_token']=data['id_token']
     return token,email.strip().casefold()
-
