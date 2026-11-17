@@ -1,0 +1,3222 @@
+#!/usr/bin/env node
+"use strict";
+
+const { spawn, spawnSync } = require("child_process");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const home = os.homedir();
+const packageVersion = readPackageVersion();
+
+const weeklySimilarDelta = 5;
+const weeklyWindowDurationMins = 7 * 24 * 60;
+const quotaBarWidth = 20;
+const ansiColors = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  green: "\x1b[32m",
+};
+const rateLimitTextPattern =
+  /(?:usage limits?|out of credits|credits_depleted|usage_limit_reached|rate_limit_reached|spend cap|insufficient_quota|requires_payment_method|exceeded your current quota|429|Too Many Requests)/i;
+const rateLimitReasonPattern =
+  /(?:You['’‘ʼ＇]ve hit your usage limit|You['’‘ʼ＇]ve reached your usage limit|Usage limit reached|Your workspace is out of credits|You['’‘ʼ＇]re out of credits|You exceeded your current quota|insufficient_quota|requires_payment_method|workspace_(?:owner|member)_(?:credits_depleted|usage_limit_reached)|\bcredits_depleted\b|\brate_limit_reached\b|You hit your spend cap)/i;
+const turnErrorRateLimitPattern = new RegExp(`\\bTurn error:.*${rateLimitReasonPattern.source}`, "i");
+const turnErrorHttpRateLimitPattern = /\bTurn error:.*(?:429|Too Many Requests|HTTP status client error)/i;
+const structuredGoalUsageLimitPattern =
+  /^(?:\d{4}-\d{2}-\d{2}T.*\b(?:INFO|WARN|ERROR)\b.*|(?:INFO|WARN|ERROR):?\s+.*)Goal hit usage limits\b/i;
+const rateLimitUiPattern =
+  /^■\s*(?:Your workspace is out of credits\b|You['’‘ʼ＇]re out of credits\b|Usage limit reached\b|You['’‘ʼ＇]ve (?:hit|reached) your usage limit\b)/i;
+const nonAccountRateLimitPattern =
+  /(?:codex_core_plugins::startup_sync|GitHub HTTP sync failed|curated plugin sync|api\.github\.com\/repos\/openai\/plugins|github\.com\/openai\/plugins(?:\.git)?|docs\.github\.com\/en\/site-policy\/github-terms|You have exceeded a secondary rate limit)/i;
+const logLevelLinePattern = /^(?:\d{4}-\d{2}-\d{2}T.*\b(?:INFO|WARN|ERROR)\b.*|(?:INFO|WARN|ERROR):?\b.*)/i;
+const apiKeyModes = new Set(["prefer", "fallback"]);
+const continuationPrompt =
+  "Continue the interrupted task from the last user instruction in this session. " +
+  "The previous attempt was interrupted before completing the turn; do not ask the user to repeat it.";
+const codexSubcommands = new Set([
+  "exec",
+  "e",
+  "review",
+  "login",
+  "logout",
+  "mcp",
+  "plugin",
+  "mcp-server",
+  "app-server",
+  "remote-control",
+  "completion",
+  "update",
+  "doctor",
+  "sandbox",
+  "debug",
+  "apply",
+  "a",
+  "resume",
+  "archive",
+  "unarchive",
+  "fork",
+  "cloud",
+  "exec-server",
+  "features",
+  "help",
+]);
+const execSubcommands = new Set(["resume", "review", "help"]);
+const globalValueOptions = new Set([
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "--remote",
+  "--remote-auth-token-env",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "-a",
+  "--ask-for-approval",
+]);
+const execResumeValueOptions = new Set([
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "--output-schema",
+  "-o",
+  "--output-last-message",
+]);
+const execAnalyzeValueOptions = new Set([...execResumeValueOptions, "--color", "--sandbox", "-s", "--ask-for-approval", "-a", "--cd", "-C"]);
+const execResumeSupportedOptions = new Set([
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--dangerously-bypass-hook-trust",
+  "--all",
+  "--disable",
+  "--enable",
+  "--ephemeral",
+  "--ignore-rules",
+  "--ignore-user-config",
+  "--json",
+  "--local-provider",
+  "--model",
+  "--oss",
+  "--output-last-message",
+  "--output-schema",
+  "--profile",
+  "--skip-git-repo-check",
+  "--strict-config",
+  "--config",
+  "-c",
+  "-i",
+  "-m",
+  "-o",
+  "-p",
+]);
+
+let activeChild = null;
+const probeChildren = new Set();
+let defaultAccountsCache = null;
+let runtimeConfigCache = null;
+let terminating = false;
+
+function readPackageVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).version || "0.6.0";
+  } catch {
+    return "0.6.0";
+  }
+}
+
+function usage() {
+  console.log(`Usage:
+  cx [codex args...]                         Auto-select account and auto-switch on limits.
+  cx exec "prompt"                           Auto-select account and auto-switch on limits.
+  cx auto [codex args...]                    Same as cx without --account.
+  cx --account <selector> [codex args...]    Run only with one selected account.
+  cx status
+  cx quota|limits|remaining                  Print weighted quota bars and reset times.
+  cx --dry-run [codex args...]
+  cx --no-bypass [codex args...]
+  cx --no-trust [codex args...]
+
+Beginner path:
+  1. Create account folders: cx-setup --accounts 3 --migrate
+  2. Log in each account:   CODEX_HOME="$HOME/.codex-account1" codex login
+  3. Check accounts:        cx status
+  4. Check remaining quota: cx quota
+  5. Start Codex:           cxa
+
+Environment:
+  CX_ACCOUNT=1|account1|work                    Same as --account.
+  CX_ACCOUNT_COUNT=N                            Probe ~/.codex-account1..N.
+  CX_ACCOUNT_HOMES=/path/a,/path/b              Explicit comma-separated CODEX_HOME list.
+  CX_NO_BYPASS=1                                Do not add the bypass flag.
+  CX_NO_TRUST=1                                 Do not write project trust for the current workdir.
+  CX_COLOR=1|0                                  Force-enable or disable quota colors.
+  CX_AUTO_RESUME_GOAL=0                         Do not reactivate paused/limited goals before resume.
+  CX_API_KEY_MODE=prefer|fallback               API-key account selection mode. Default: fallback.
+  CX_LIMIT_TIMEOUT_MS=30000                     Rate-limit probe timeout.
+  CX_LIMIT_RETRIES=3                            Rate-limit probe attempts per account.
+  CX_LIMIT_RETRY_DELAY_MS=1500                  Delay before retrying a failed probe.
+  CX_AUTO_MAX_SWITCHES=5                        Max automatic account switches per run.
+  CX_INTERACTIVE_AUTO_EXEC=1                    Resume interrupted interactive turns in exec mode.
+
+Behavior:
+  cx launches the real Codex CLI with the selected CODEX_HOME, preserving
+  official Codex behavior while adding local account selection and handoff.
+  During one auto-switched task, model/profile/reasoning defaults are pinned
+  from explicit task args or the first selected account. If the interrupted
+  session records a later turn_context model/effort or /slow, the retry uses
+  that latest task state. New Codex task runs leave service_tier unset so Codex
+  can use the selected model's default. /fast on or an active Fast service tier
+  is inherited as service_tier="fast"; /fast off removes that override instead
+  of being rewritten as a reasoning-effort change.
+  By default it writes the current directory and any --cd/-C target to the
+  selected account's config.toml as projects."<path>".trust_level="trusted".
+  Use --no-trust or CX_NO_TRUST=1 to keep Codex's normal trust prompt.
+`);
+}
+
+function parseArgs(argv) {
+  const codexArgs = [];
+  const options = {
+    auto: false,
+    status: false,
+    quota: false,
+    dryRun: false,
+    noBypass: process.env.CX_NO_BYPASS === "1",
+    noTrust: process.env.CX_NO_TRUST === "1",
+    account: process.env.CX_ACCOUNT || null,
+    accountExplicit: Boolean(process.env.CX_ACCOUNT),
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--") {
+      codexArgs.push(...argv.slice(i + 1));
+      break;
+    }
+    if ((arg === "-h" || arg === "--help") && codexArgs.length === 0) {
+      usage();
+      process.exit(0);
+    }
+    if ((arg === "auto" && codexArgs.length === 0) || arg === "--auto" || arg === "--auto-switch") {
+      options.auto = true;
+      continue;
+    }
+    if ((arg === "status" && codexArgs.length === 0) || arg === "--status") {
+      options.status = true;
+      continue;
+    }
+    if (
+      ((arg === "quota" || arg === "limits" || arg === "remaining") && codexArgs.length === 0) ||
+      arg === "--quota" ||
+      arg === "--limits" ||
+      arg === "--remaining"
+    ) {
+      options.quota = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      options.dryRun = true;
+      continue;
+    }
+    if (arg === "--no-bypass") {
+      options.noBypass = true;
+      continue;
+    }
+    if (arg === "--no-trust") {
+      options.noTrust = true;
+      continue;
+    }
+    if (arg === "--account") {
+      if (!argv[i + 1] || argv[i + 1].startsWith("-")) {
+        const error = new Error("--account requires a selector");
+        error.exitCode = 2;
+        throw error;
+      }
+      options.account = argv[i + 1];
+      options.accountExplicit = true;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--account=")) {
+      options.account = arg.slice("--account=".length);
+      options.accountExplicit = true;
+      continue;
+    }
+    codexArgs.push(arg);
+  }
+
+  return { options, codexArgs };
+}
+
+function parsePositiveInteger(value, fallback, label) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    const error = new Error(`${label} must be a positive integer`);
+    error.exitCode = 2;
+    throw error;
+  }
+  return parsed;
+}
+
+function getRuntimeConfig() {
+  if (!runtimeConfigCache) {
+    const localConfig = readLocalConfig();
+    runtimeConfigCache = {
+      timeoutMs: parsePositiveInteger(process.env.CX_LIMIT_TIMEOUT_MS, 30000, "CX_LIMIT_TIMEOUT_MS"),
+      limitRetries: parsePositiveInteger(process.env.CX_LIMIT_RETRIES, 3, "CX_LIMIT_RETRIES"),
+      limitRetryDelayMs: parsePositiveInteger(process.env.CX_LIMIT_RETRY_DELAY_MS, 1500, "CX_LIMIT_RETRY_DELAY_MS"),
+      autoMaxSwitches: parsePositiveInteger(process.env.CX_AUTO_MAX_SWITCHES, 5, "CX_AUTO_MAX_SWITCHES"),
+      apiKeyMode: normalizeApiKeyMode(process.env.CX_API_KEY_MODE || localConfig.apiKeyMode || "fallback", "CX_API_KEY_MODE"),
+    };
+  }
+  return runtimeConfigCache;
+}
+
+function localConfigPath() {
+  const base = process.env.XDG_CONFIG_HOME ? expandHomePath(process.env.XDG_CONFIG_HOME) : path.join(home, ".config");
+  return path.join(base, "codex-cx", "config.json");
+}
+
+function readLocalConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(localConfigPath(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function stripTomlComment(line) {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inDouble && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (!inDouble && char === "'") {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (!inSingle && char === '"') {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (!inSingle && !inDouble && char === "#") {
+      return line.slice(0, index);
+    }
+  }
+
+  return line;
+}
+
+function parseTomlScalarString(rawValue) {
+  const value = stripTomlComment(String(rawValue || "")).trim();
+  if (!value) {
+    return "";
+  }
+
+  if (value.startsWith('"')) {
+    const match = value.match(/^"((?:\\.|[^"\\])*)"/);
+    if (!match) {
+      return "";
+    }
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch {
+      return match[1];
+    }
+  }
+
+  if (value.startsWith("'")) {
+    const end = value.indexOf("'", 1);
+    return end > 0 ? value.slice(1, end) : "";
+  }
+
+  return value.split(/\s+/u, 1)[0] || "";
+}
+
+function readTopLevelTomlStrings(file, keys) {
+  const values = {};
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return values;
+  }
+
+  for (const line of text.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+
+    const match = trimmed.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/u);
+    if (!match || !keys.has(match[1])) {
+      continue;
+    }
+
+    const value = parseTomlScalarString(match[2]);
+    if (value) {
+      values[match[1]] = value;
+    }
+  }
+
+  return values;
+}
+
+function normalizeApiKeyMode(value, label = "api key mode") {
+  const normalized = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  if (["prefer", "first", "api-key-first", "apikey-first", "apikey", "api-key"].includes(normalized)) {
+    return "prefer";
+  }
+  if (["fallback", "account-first", "after-limit", "limit-fallback", "limit-exhausted"].includes(normalized)) {
+    return "fallback";
+  }
+  if (!apiKeyModes.has(normalized)) {
+    const error = new Error(`${label} must be prefer or fallback`);
+    error.exitCode = 2;
+    throw error;
+  }
+  return normalized;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function naturalAccountSort(a, b) {
+  const left = a.suffix.match(/^\d+$/) ? Number(a.suffix) : null;
+  const right = b.suffix.match(/^\d+$/) ? Number(b.suffix) : null;
+  if (left !== null && right !== null) {
+    return left - right;
+  }
+  if (left !== null) {
+    return -1;
+  }
+  if (right !== null) {
+    return 1;
+  }
+  return a.name.localeCompare(b.name);
+}
+
+function expandHomePath(value) {
+  if (value === "~") {
+    return home;
+  }
+  if (value.startsWith("~/")) {
+    return path.join(home, value.slice(2));
+  }
+  return path.resolve(value);
+}
+
+function discoveredAccountName(fileName, index) {
+  const suffix = fileName.slice(".codex-account".length);
+  if (/^\d+$/.test(suffix)) {
+    return `account${suffix}`;
+  }
+  const trimmed = suffix.replace(/^-+/, "");
+  return trimmed || `account${index + 1}`;
+}
+
+function discoverAccountHomes() {
+  let entries;
+  try {
+    entries = fs.readdirSync(home, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) =>
+      entry.name.startsWith(".codex-account") &&
+      entry.name !== ".codex-account" &&
+      !entry.name.includes(".cx-backup-")
+    )
+    .map((entry, index) => ({
+      dirent: entry,
+      name: discoveredAccountName(entry.name, index),
+      suffix: entry.name.slice(".codex-account".length),
+      home: path.join(home, entry.name),
+    }))
+    .filter((account) => {
+      if (account.dirent.isDirectory() || account.dirent.isSymbolicLink()) {
+        return true;
+      }
+      try {
+        return fs.statSync(account.home).isDirectory();
+      } catch {
+        return false;
+      }
+    })
+    .sort(naturalAccountSort)
+    .map(({ name, home: accountHome }) => ({ name, home: accountHome }));
+}
+
+function buildDefaultAccounts() {
+  const homes = process.env.CX_ACCOUNT_HOMES;
+  if (homes) {
+    const accounts = homes
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry, index) => {
+        const equals = entry.indexOf("=");
+        if (equals >= 0) {
+          const name = entry.slice(0, equals).trim() || `account${index + 1}`;
+          const accountHome = entry.slice(equals + 1).trim();
+          if (!accountHome) {
+            throw new Error("CX_ACCOUNT_HOMES entries must include a path");
+          }
+          return { name, home: expandHomePath(accountHome) };
+        }
+        return { name: `account${index + 1}`, home: expandHomePath(entry) };
+      });
+    if (accounts.length < 1) {
+      throw new Error("CX_ACCOUNT_HOMES requires at least one account home");
+    }
+    return validateAccounts(accounts, "CX_ACCOUNT_HOMES");
+  }
+
+  if (process.env.CX_ACCOUNT_COUNT) {
+    const count = parsePositiveInteger(process.env.CX_ACCOUNT_COUNT, null, "CX_ACCOUNT_COUNT");
+    return validateAccounts(Array.from({ length: count }, (_, index) => {
+      const number = index + 1;
+      return { name: `account${number}`, home: path.join(home, `.codex-account${number}`) };
+    }), "CX_ACCOUNT_COUNT");
+  }
+
+  return validateAccounts(discoverAccountHomes(), "discovered accounts");
+}
+
+function validateAccounts(accounts, label) {
+  const names = new Map();
+  const homes = new Map();
+
+  for (const account of accounts) {
+    const normalizedName = account.name.toLowerCase();
+    const normalizedHome = path.resolve(account.home);
+    if (names.has(normalizedName)) {
+      throw new Error(`${label} has duplicate account name: ${account.name}`);
+    }
+    if (homes.has(normalizedHome)) {
+      throw new Error(`${label} has duplicate account home: ${normalizedHome}`);
+    }
+    names.set(normalizedName, account);
+    homes.set(normalizedHome, account);
+  }
+
+  return accounts.map((account) => ({ ...account, home: path.resolve(account.home) }));
+}
+
+function safeAccountName(name) {
+  return name.replace(/[^A-Za-z0-9_.-]/g, "_") || "account";
+}
+
+function getDefaultAccounts() {
+  if (!defaultAccountsCache) {
+    try {
+      defaultAccountsCache = buildDefaultAccounts();
+    } catch (error) {
+      error.exitCode = error.exitCode || 2;
+      throw error;
+    }
+  }
+  return defaultAccountsCache;
+}
+
+function isPlausibleEmail(value) {
+  return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function findEmailValue(value, depth = 0) {
+  if (!value || depth > 8) {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const email = findEmailValue(item, depth + 1);
+      if (email) {
+        return email;
+      }
+    }
+    return "";
+  }
+  if (typeof value !== "object") {
+    return "";
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key.toLowerCase() === "email" && isPlausibleEmail(child)) {
+      return child.trim();
+    }
+  }
+  for (const child of Object.values(value)) {
+    const email = findEmailValue(child, depth + 1);
+    if (email) {
+      return email;
+    }
+  }
+  return "";
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function extractJwtEmail(token) {
+  if (typeof token !== "string") {
+    return "";
+  }
+  const parts = token.split(".");
+  if (parts.length < 2 || !parts[1]) {
+    return "";
+  }
+  try {
+    return findEmailValue(JSON.parse(base64UrlDecode(parts[1])));
+  } catch {
+    return "";
+  }
+}
+
+function findJwtEmail(value, depth = 0) {
+  if (!value || depth > 8) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return extractJwtEmail(value);
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const email = findJwtEmail(item, depth + 1);
+      if (email) {
+        return email;
+      }
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    for (const child of Object.values(value)) {
+      const email = findJwtEmail(child, depth + 1);
+      if (email) {
+        return email;
+      }
+    }
+  }
+  return "";
+}
+
+function extractAccountEmail(auth) {
+  return findEmailValue(auth) || findJwtEmail(auth);
+}
+
+function isApiKeyAuth(auth) {
+  return Boolean(auth && (auth.auth_mode === "apikey" || auth.OPENAI_API_KEY));
+}
+
+function readAccountAuth(account) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(account.home, "auth.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function jwtExpiryMs(token) {
+  if (typeof token !== "string") {
+    return null;
+  }
+
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    const expiresAtSeconds = finiteNumber(payload?.exp);
+    return Number.isFinite(expiresAtSeconds) ? expiresAtSeconds * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+function accountAccessTokenExpired(auth, now = Date.now()) {
+  const expiresAtMs = jwtExpiryMs(auth?.tokens?.access_token);
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= now;
+}
+
+function isRetryableRateLimitError(error) {
+  const message = String(error?.message || error || "");
+  return !/(?:\b401\s+Unauthorized\b|\b403\s+Forbidden\b|token_expired|authentication token is expired|invalid[_ -]token|not logged in|login required)/i.test(
+    message,
+  );
+}
+
+function readAccountEmail(account) {
+  const auth = readAccountAuth(account);
+  return auth ? extractAccountEmail(auth) : "";
+}
+
+function accountDisplayName(account) {
+  if (process.env.CX_LOCAL_SAFE_RESUME === "1") return account.name;
+  const auth = readAccountAuth(account);
+  if (isApiKeyAuth(auth)) {
+    return `${account.name} (api-key)`;
+  }
+  const email = readAccountEmail(account);
+  return email ? `${account.name} (${email})` : account.name;
+}
+
+function accountSelectorHint(accounts = getDefaultAccounts()) {
+  if (accounts.length < 1) {
+    return "no accounts configured; run cx-setup --accounts <N> --migrate or set CX_ACCOUNT_HOMES";
+  }
+  const numeric = accounts.map((_, index) => String(index + 1)).join("|");
+  const names = accounts.map((account) => account.name).join("|");
+  return `${numeric}|${names}`;
+}
+
+function accountMatches(account, selector, accounts = getDefaultAccounts()) {
+  if (!selector) {
+    return false;
+  }
+  const normalized = String(selector).trim().toLowerCase();
+  const index = accounts.indexOf(account);
+  return (
+    (index >= 0 && normalized === String(index + 1)) ||
+    normalized === account.name.toLowerCase() ||
+    normalized === account.name.replace(/^account/, "") ||
+    normalized === path.basename(account.home).replace(/^\.codex-account/, "")
+  );
+}
+
+async function readRateLimits(account, options = {}) {
+  const authPath = path.join(account.home, "auth.json");
+  if (!fs.existsSync(authPath)) {
+    return Promise.resolve({ account, ok: false, error: `missing ${authPath}` });
+  }
+
+  const auth = readAccountAuth(account);
+  if (!auth) {
+    return Promise.resolve({ account, ok: false, authMode: "unknown", error: `invalid ${authPath}` });
+  }
+  if (isApiKeyAuth(auth)) {
+    if (!auth.OPENAI_API_KEY) {
+      return Promise.resolve({ account, ok: false, authMode: "apikey", error: `missing OPENAI_API_KEY in ${authPath}` });
+    }
+    return Promise.resolve({
+      account,
+      ok: true,
+      authMode: "apikey",
+      syntheticLimits: true,
+      limits: {
+        weekly: { usedPercent: 0, windowDurationMins: weeklyWindowDurationMins },
+        rateLimitReachedType: "",
+      },
+    });
+  }
+
+  if (process.env.CX_LOCAL_SAFE_RESUME !== "1" && accountAccessTokenExpired(auth)) {
+    return Promise.resolve({
+      account,
+      ok: false,
+      authMode: "account",
+      error: `access token expired; run CODEX_HOME=${account.home} codex login`,
+    });
+  }
+
+  const runtimeConfig = getRuntimeConfig();
+  const limitRetries = options.limitRetries || runtimeConfig.limitRetries;
+  const limitRetryDelayMs = options.limitRetryDelayMs || runtimeConfig.limitRetryDelayMs;
+  let lastError = null;
+  for (let attempt = 1; attempt <= limitRetries; attempt += 1) {
+    try {
+      const result = await appServerRequest(account.home, "account/rateLimits/read", null);
+      return { account, ok: true, authMode: "account", limits: extractCodexLimit(result) };
+    } catch (error) {
+      lastError = error;
+      if (!terminating && attempt < limitRetries && isRetryableRateLimitError(error)) {
+        await sleep(limitRetryDelayMs);
+      } else {
+        break;
+      }
+    }
+  }
+
+  return { account, ok: false, authMode: "account", error: lastError?.message || "rate-limit read failed" };
+}
+
+function appServerRequest(accountHome, method, params, options = {}) {
+  return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeoutMs || getRuntimeConfig().timeoutMs;
+
+    const env = { ...process.env, CODEX_HOME: accountHome, CODEX_TRUST_ALL: "0" };
+    delete env.CODEX_THREAD_ID;
+
+    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    probeChildren.add(child);
+    child.on("exit", () => probeChildren.delete(child));
+    let buffer = "";
+    let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      finish(new Error(`timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    function finish(error, result) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    }
+
+    function send(message) {
+      try {
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      } catch (error) {
+        finish(error);
+      }
+    }
+
+    child.on("error", (error) => finish(error));
+    child.stdin.on("error", (error) => finish(error));
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 4000) {
+        stderr = stderr.slice(-4000);
+      }
+    });
+    child.on("exit", (code) => {
+      if (!settled && code !== 0) {
+        finish(new Error(stderr.trim() || `codex app-server exited ${code}`));
+      }
+    });
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) {
+          break;
+        }
+
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) {
+          continue;
+        }
+
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch (error) {
+          finish(new Error(`invalid JSON-RPC response: ${error.message}`));
+          return;
+        }
+
+        if (message.id === "init") {
+          if (message.error) {
+            finish(new Error(message.error.message || "app-server initialize failed"));
+            return;
+          }
+          send({ method: "initialized", params: {} });
+          send({ id: "request", method, params });
+          continue;
+        }
+
+        if (message.id === "request") {
+          if (message.error) {
+            finish(new Error(message.error.message || `${method} failed`));
+          } else {
+            finish(null, message.result);
+          }
+          return;
+        }
+      }
+    });
+
+    send({
+      id: "init",
+      method: "initialize",
+      params: {
+        clientInfo: { name: "cx", version: packageVersion },
+        capabilities: { experimentalApi: true },
+      },
+    });
+  });
+}
+
+function extractCodexLimit(result) {
+  return (
+    result?.rateLimitsByLimitId?.codex ||
+    result?.rateLimits ||
+    Object.values(result?.rateLimitsByLimitId || {})[0] ||
+    null
+  );
+}
+
+function finiteNumber(value) {
+  if (Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const parsed = finiteNumber(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function rateLimitWindowDurationMins(bucket) {
+  return firstFiniteNumber(
+    bucket?.windowDurationMins,
+    bucket?.window_duration_mins,
+    bucket?.windowMinutes,
+    bucket?.window_minutes,
+  );
+}
+
+function weeklyQuotaBucket(limit) {
+  for (const bucket of [limit?.weekly, limit?.week]) {
+    if (bucket && typeof bucket === "object") {
+      return bucket;
+    }
+  }
+
+  // OpenAI's primary/secondary slots are nullable and no longer identify a fixed quota type.
+  for (const bucket of [limit?.primary, limit?.secondary]) {
+    if (
+      bucket &&
+      typeof bucket === "object" &&
+      rateLimitWindowDurationMins(bucket) === weeklyWindowDurationMins
+    ) {
+      return bucket;
+    }
+  }
+
+  return null;
+}
+
+function fiveHourQuotaBucket(limit) {
+  return [limit?.primary, limit?.secondary].find(
+    bucket => rateLimitWindowDurationMins(bucket) === 300
+  ) || null;
+}
+
+function rawUsedPercent(bucket) {
+  return firstFiniteNumber(bucket?.usedPercent, bucket?.used_percent);
+}
+
+function usedPercent(limit) {
+  return rawUsedPercent(weeklyQuotaBucket(limit));
+}
+
+function rawQuotaCapacity(bucket) {
+  if (!bucket || typeof bucket !== "object") {
+    return null;
+  }
+
+  const capacity = firstFiniteNumber(
+    bucket.limit,
+    bucket.max,
+    bucket.total,
+    bucket.quota,
+    bucket.capacity,
+    bucket.allowance,
+    bucket.allowed,
+    bucket.limitValue,
+    bucket.maxValue,
+    bucket.totalLimit,
+    bucket.quotaLimit,
+    bucket.creditLimit,
+    bucket.limit_value,
+    bucket.max_value,
+    bucket.total_limit,
+    bucket.quota_limit,
+    bucket.credit_limit,
+    bucket.maxRequests,
+    bucket.max_requests,
+    bucket.requestLimit,
+    bucket.request_limit,
+  );
+
+  return Number.isFinite(capacity) && capacity > 0 ? capacity : null;
+}
+
+function epochMillis(value) {
+  const numeric = finiteNumber(value);
+  if (Number.isFinite(numeric)) {
+    return numeric > 100000000000 ? numeric : numeric * 1000;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function rawQuotaResetMs(bucket) {
+  if (!bucket || typeof bucket !== "object") {
+    return null;
+  }
+
+  const absolute = firstFiniteNumber(
+    bucket.resets_at,
+    bucket.resetsAt,
+    bucket.reset_at,
+    bucket.resetAt,
+    bucket.reset_time,
+    bucket.resetTime,
+    bucket.next_reset,
+    bucket.nextReset,
+    bucket.next_resets_at,
+    bucket.nextResetsAt,
+  );
+  if (Number.isFinite(absolute)) {
+    return epochMillis(absolute);
+  }
+
+  for (const value of [
+    bucket.resets_at,
+    bucket.resetsAt,
+    bucket.reset_at,
+    bucket.resetAt,
+    bucket.reset_time,
+    bucket.resetTime,
+    bucket.next_reset,
+    bucket.nextReset,
+    bucket.next_resets_at,
+    bucket.nextResetsAt,
+  ]) {
+    const parsed = epochMillis(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  const relativeSeconds = firstFiniteNumber(
+    bucket.retry_after,
+    bucket.retryAfter,
+    bucket.reset_after,
+    bucket.resetAfter,
+    bucket.resets_in,
+    bucket.resetsIn,
+    bucket.retryAfterSeconds,
+    bucket.retry_after_seconds,
+  );
+  return Number.isFinite(relativeSeconds) ? Date.now() + relativeSeconds * 1000 : null;
+}
+
+function reached(limit) {
+  if (!limit) {
+    return "unknown";
+  }
+  return limit.rateLimitReachedType || limit.rate_limit_reached_type || "";
+}
+
+function normalizeReachedReason(reason, limit) {
+  const normalized = String(reason || "").toLowerCase();
+  const weekly = weeklyQuotaBucket(limit);
+  if (
+    (normalized === "primary" || normalized === "primary_limit_reached") &&
+    weekly === limit?.primary
+  ) {
+    return "weekly>=100%";
+  }
+  if (
+    (normalized === "secondary" || normalized === "secondary_limit_reached") &&
+    weekly === limit?.secondary
+  ) {
+    return "weekly>=100%";
+  }
+  if (normalized === "workspace_owner_credits_depleted" || normalized === "workspace_member_credits_depleted") {
+    return "credits depleted";
+  }
+  if (normalized === "workspace_owner_usage_limit_reached" || normalized === "workspace_member_usage_limit_reached") {
+    return "usage limit reached";
+  }
+  if (
+    normalized === "rate_limit_reached" ||
+    normalized === "primary" ||
+    normalized === "primary_limit_reached" ||
+    normalized === "secondary" ||
+    normalized === "secondary_limit_reached"
+  ) {
+    return "rate limit reached";
+  }
+  return reason;
+}
+
+function limitExhaustedReason(result) {
+  if (!result?.ok) {
+    return result?.error || "probe failed";
+  }
+  if (!result.limits) {
+    return "missing limits";
+  }
+
+  const shortWindow = fiveHourQuotaBucket(result.limits);
+  if (shortWindow && rawUsedPercent(shortWindow) >= 100) return "5h>=100%";
+  const weekly = weeklyQuotaBucket(result.limits);
+  if (!weekly) {
+    return "missing weekly limit";
+  }
+
+  const weeklyUsed = rawUsedPercent(weekly);
+  if (!Number.isFinite(weeklyUsed)) {
+    return "invalid weekly limit";
+  }
+  if (weeklyUsed >= 100) {
+    return "weekly>=100%";
+  }
+
+  const reachedType = reached(result.limits);
+  if (reachedType) {
+    return normalizeReachedReason(reachedType, result.limits);
+  }
+
+  return "";
+}
+
+function isUsable(result) {
+  return Boolean(result?.ok && result.limits && !limitExhaustedReason(result));
+}
+
+function isApiKeyResult(result) {
+  return result?.authMode === "apikey";
+}
+
+function getProcessActiveAccountNames() {
+  const names = new Set();
+  const accounts = getDefaultAccounts();
+  let pids;
+  try {
+    pids = fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry));
+  } catch {
+    return names;
+  }
+
+  for (const pid of pids) {
+    try {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const command = cmdline.join(" ");
+      if (!command.includes("codex") || command.includes("app-server")) {
+        continue;
+      }
+      const environ = fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
+      const codexHome = environ
+        .map((entry) => entry.match(/^CODEX_HOME=(.*)$/))
+        .find(Boolean)?.[1];
+      if (!codexHome) {
+        continue;
+      }
+      const account = accounts.find((candidate) => path.resolve(candidate.home) === path.resolve(codexHome));
+      if (account) {
+        names.add(account.name);
+      }
+    } catch {
+      // Processes can exit while we scan /proc.
+    }
+  }
+
+  return names;
+}
+
+function getActiveAccountNames() {
+  return getProcessActiveAccountNames();
+}
+
+function compareAccountResults(a, b, options = {}) {
+  const apiKeyMode = options.apiKeyMode || getRuntimeConfig().apiKeyMode;
+  const aUsable = isUsable(a);
+  const bUsable = isUsable(b);
+  if (aUsable !== bUsable) {
+    return aUsable ? -1 : 1;
+  }
+
+  if (aUsable && bUsable && isApiKeyResult(a) !== isApiKeyResult(b)) {
+    if (apiKeyMode === "prefer") {
+      return isApiKeyResult(a) ? -1 : 1;
+    }
+    return isApiKeyResult(a) ? 1 : -1;
+  }
+
+  if (aUsable && bUsable) {
+    const aWeekly = usedPercent(a.limits);
+    const bWeekly = usedPercent(b.limits);
+    const weeklyDelta = aWeekly - bWeekly;
+    if (Math.abs(weeklyDelta) > weeklySimilarDelta) {
+      return weeklyDelta;
+    }
+
+    if (a.active !== b.active) {
+      return a.active ? 1 : -1;
+    }
+
+    if (weeklyDelta !== 0) {
+      return weeklyDelta;
+    }
+  } else if (a.active !== b.active) {
+    return a.active ? 1 : -1;
+  }
+
+  return a.account.name.localeCompare(b.account.name);
+}
+
+function remainingPercent(result) {
+  if (!result?.ok || !result.limits) {
+    return null;
+  }
+
+  const used = usedPercent(result.limits);
+  if (!Number.isFinite(used)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, 100 - used));
+}
+
+function formatOptionalPercent(value) {
+  if (!Number.isFinite(value)) {
+    return "ERR";
+  }
+  const rounded = Math.round(value * 100) / 100;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/0+$/u, "").replace(/\.$/u, "");
+  return `${text}%`;
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatLocalDateTime(ms) {
+  const date = new Date(ms);
+  return (
+    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ` +
+    `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  );
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) {
+    return "unknown";
+  }
+  if (ms <= 0) {
+    return "now";
+  }
+
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) {
+    return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  }
+  if (hours > 0) {
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+  return `${mins}m`;
+}
+
+function formatResetTime(ms, now = Date.now()) {
+  if (!Number.isFinite(ms)) {
+    return "unknown";
+  }
+  const relative = ms <= now ? "now" : `in ${formatDuration(ms - now)}`;
+  return `${relative} (${formatLocalDateTime(ms)})`;
+}
+
+function shouldUseColor(stream = process.stderr) {
+  if (process.env.CX_COLOR === "1") {
+    return true;
+  }
+  if (process.env.CX_COLOR === "0" || process.env.NO_COLOR) {
+    return false;
+  }
+  return Boolean(stream.isTTY);
+}
+
+function colorize(text, color, enabled) {
+  if (!enabled || !text) {
+    return text;
+  }
+  return `${ansiColors[color] || ""}${text}${ansiColors.reset}`;
+}
+
+function quotaColor(value) {
+  if (!Number.isFinite(value)) {
+    return "yellow";
+  }
+  if (value >= 50) {
+    return "green";
+  }
+  if (value >= 20) {
+    return "yellow";
+  }
+  return "red";
+}
+
+function formatProgressPercent(value, width = quotaBarWidth, options = {}) {
+  const colors = options.colors ?? shouldUseColor();
+  if (!Number.isFinite(value)) {
+    return `[${colorize("?".repeat(width), "yellow", colors)}] ${colorize("ERR", "yellow", colors)}`;
+  }
+  const clamped = Math.max(0, Math.min(100, value));
+  const filled = Math.round((clamped / 100) * width);
+  const color = quotaColor(clamped);
+  return (
+    `[${colorize("#".repeat(filled), color, colors)}${colorize("-".repeat(width - filled), "dim", colors)}] ` +
+    colorize(formatOptionalPercent(clamped), color, colors)
+  );
+}
+
+function weeklyQuotaSummary(results) {
+  let totalCapacity = 0;
+  let remainingCapacity = 0;
+  let accountCount = 0;
+  let weightedCount = 0;
+  let fallbackCount = 0;
+  let resetMs = null;
+
+  for (const result of results) {
+    const weekly = weeklyQuotaBucket(result.limits);
+    const remaining = remainingPercent(result);
+    if (!Number.isFinite(remaining)) {
+      continue;
+    }
+
+    const capacity = rawQuotaCapacity(weekly);
+    const weight = Number.isFinite(capacity) ? capacity : 1;
+    if (Number.isFinite(capacity)) {
+      weightedCount += 1;
+    } else {
+      fallbackCount += 1;
+    }
+
+    accountCount += 1;
+    totalCapacity += weight;
+    remainingCapacity += (remaining / 100) * weight;
+
+    const candidateResetMs = rawQuotaResetMs(weekly);
+    if (Number.isFinite(candidateResetMs) && (!Number.isFinite(resetMs) || candidateResetMs < resetMs)) {
+      resetMs = candidateResetMs;
+    }
+  }
+
+  return {
+    percent: totalCapacity > 0 ? (remainingCapacity / totalCapacity) * 100 : null,
+    accountCount,
+    weightedCount,
+    fallbackCount,
+    resetMs,
+  };
+}
+
+function quotaTotalSummary(results) {
+  return weeklyQuotaSummary(results);
+}
+
+function quotaTotalLabel(summary) {
+  if (summary.accountCount < 1) {
+    return "Total";
+  }
+
+  if (summary.weightedCount > 0 && summary.fallbackCount > 0) {
+    return "Total [weighted; missing capacities use equal weight]";
+  }
+  if (summary.weightedCount > 0) {
+    return "Total [weighted by quota capacity]";
+  }
+  return "Total [equal-weight fallback]";
+}
+
+function printStatus(results) {
+  const { apiKeyMode } = getRuntimeConfig();
+  console.error(
+    `Selection rule: weekly delta > ${weeklySimilarDelta}% wins; otherwise prefer inactive accounts, then lower weekly usage; ` +
+      `API-key mode is ${apiKeyMode}; exhausted accounts are skipped.`,
+  );
+  console.error("Account   active   auth      weekly used   reached   home");
+  for (const result of results.slice().sort((a, b) => compareAccountResults(a, b, { apiKeyMode }))) {
+    const limit = result.limits;
+    const active = result.active ? "yes" : "-";
+    const auth = result.authMode === "apikey" ? "api-key" : result.authMode === "account" ? "account" : "-";
+    const weekly = result.ok ? formatOptionalPercent(usedPercent(limit)) : "ERR";
+    const hit = limitExhaustedReason(result) || "-";
+    console.error(
+      `${result.account.name.padEnd(9)} ${active.padEnd(8)} ${auth.padEnd(9)} ${weekly.padEnd(13)} ${String(hit).padEnd(9)} ${result.account.home}`,
+    );
+  }
+}
+
+function printQuota(results) {
+  console.error("Quota remaining:");
+  const total = quotaTotalSummary(results);
+  console.error(quotaTotalLabel(total));
+  console.error(`  weekly ${formatProgressPercent(total.percent)}  reset ${formatResetTime(total.resetMs)}`);
+  for (const result of results) {
+    const auth = result.authMode === "apikey" ? "api-key" : result.authMode === "account" ? "account" : "-";
+    const weekly = weeklyQuotaBucket(result.limits);
+    const remaining = formatProgressPercent(remainingPercent(result));
+    const hit = limitExhaustedReason(result) || "-";
+    console.error(`${result.account.name} [${auth}]${hit === "-" ? "" : ` (${hit})`}`);
+    const shortWindow = fiveHourQuotaBucket(result.limits);
+    const shortUsed = rawUsedPercent(shortWindow);
+    console.error(`  5h     ${formatProgressPercent(Number.isFinite(shortUsed) ? 100 - shortUsed : null)}  reset ${formatResetTime(rawQuotaResetMs(shortWindow))}`);
+    console.error(`  weekly ${remaining}  reset ${formatResetTime(rawQuotaResetMs(weekly))}`);
+    console.error(`  home   ${result.account.home}`);
+  }
+}
+
+function printNoAccountsConfigured() {
+  console.error("[cx] No Codex account homes found.");
+  console.error("[cx] On a new machine, run: cx-setup --accounts <N> --migrate");
+  console.error("[cx] Or set: CX_ACCOUNT_HOMES=name=/path/to/codex-home,name2=/path/to/other-home");
+}
+
+function hasSafetyOverride(args) {
+  if (["sandbox_mode", "approval_policy"].some(key => hasConfigAssignment(args, key))) return true;
+  return args.some((arg) =>
+    arg === "--full-auto" ||
+    arg === "--dangerously-bypass-approvals-and-sandbox" ||
+    arg === "--sandbox" ||
+    arg.startsWith("--sandbox=") ||
+    arg === "--approval-policy" ||
+    arg.startsWith("--approval-policy=") ||
+    arg === "--ask-for-approval" ||
+    arg.startsWith("--ask-for-approval=") ||
+    arg === "-s" ||
+    arg === "-a"
+  );
+}
+
+function canonicalProjectPath(value, startCwd = process.cwd()) {
+  const expanded = expandHomePath(value);
+  const resolved = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(startCwd, expanded);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function trustedProjectPathsFromCodexArgs(args, startCwd = process.cwd()) {
+  const targets = new Set([canonicalProjectPath(startCwd, startCwd)]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      break;
+    }
+    if (arg === "-C" || arg === "--cd") {
+      if (args[index + 1]) {
+        targets.add(canonicalProjectPath(args[index + 1], startCwd));
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--cd=")) {
+      targets.add(canonicalProjectPath(arg.slice("--cd=".length), startCwd));
+    }
+  }
+
+  return [...targets];
+}
+
+function projectTrustTomlHeader(projectPath) {
+  return `[projects.${JSON.stringify(projectPath)}]`;
+}
+
+function ensureTrustedProjectToml(text, projectPath) {
+  const header = projectTrustTomlHeader(projectPath);
+  const lines = text ? text.replace(/\r\n/g, "\n").split("\n") : [];
+  if (lines.length > 0 && lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start === -1) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push(header, 'trust_level = "trusted"');
+    return { text: `${lines.join("\n")}\n`, changed: true };
+  }
+
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[.*\]\s*(?:#.*)?$/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+
+  for (let index = start + 1; index < end; index += 1) {
+    if (!/^\s*trust_level\s*=/.test(lines[index])) {
+      continue;
+    }
+    if (lines[index].trim() === 'trust_level = "trusted"') {
+      return { text, changed: false };
+    }
+    lines[index] = 'trust_level = "trusted"';
+    return { text: `${lines.join("\n")}\n`, changed: true };
+  }
+
+  lines.splice(start + 1, 0, 'trust_level = "trusted"');
+  return { text: `${lines.join("\n")}\n`, changed: true };
+}
+
+function ensureTrustedProjectsForCodexHome(codexHome, projectPaths, options = {}) {
+  const configPath = path.join(codexHome, "config.toml");
+  const uniqueProjectPaths = [...new Set(projectPaths)];
+  let text = "";
+  try {
+    text = fs.readFileSync(configPath, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  let changed = false;
+  for (const projectPath of uniqueProjectPaths) {
+    const result = ensureTrustedProjectToml(text, projectPath);
+    text = result.text;
+    changed = changed || result.changed;
+  }
+
+  if (changed && !options.dryRun) {
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(configPath, text, { mode: 0o600 });
+  }
+
+  return { changed, configPath, projectPaths: uniqueProjectPaths };
+}
+
+function ensureAccountProjectTrust(account, codexArgs, options = {}) {
+  return ensureTrustedProjectsForCodexHome(account.home, trustedProjectPathsFromCodexArgs(codexArgs), options);
+}
+
+function baseGlobalArgs(options, codexArgs, extraGlobalArgs = []) {
+  const globalArgs = [];
+  if (!options.noBypass && !hasSafetyOverride(codexArgs)) {
+    globalArgs.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+  return [...globalArgs, ...extraGlobalArgs];
+}
+
+function selectResult(results, options = {}) {
+  // Local preference never forces a single-account run: limit monitoring and
+  // the normal fallback selection remain active after the preferred slot fails.
+  const preferred = process.env.CX_LOCAL_SAFE_RESUME === "1"
+    ? process.env.CX_LOCAL_PREFER_ACCOUNT : null;
+  if (preferred) {
+    const candidate = results.find(result => result.account.name === preferred && isUsable(result));
+    if (candidate) return candidate;
+  }
+  const apiKeyMode = options.apiKeyMode || getRuntimeConfig().apiKeyMode;
+  return results.slice().sort((a, b) => compareAccountResults(a, b, { apiKeyMode })).find(isUsable) || null;
+}
+
+function optionName(arg) {
+  const equals = arg.indexOf("=");
+  return equals >= 0 ? arg.slice(0, equals) : arg;
+}
+
+function splitLeadingOptions(args, start, valueOptions) {
+  const options = [];
+  let index = start;
+
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === "--") {
+      break;
+    }
+    if (!arg.startsWith("-") || arg === "-") {
+      break;
+    }
+
+    options.push(arg);
+    if (!arg.includes("=") && valueOptions.has(optionName(arg)) && index + 1 < args.length) {
+      index += 1;
+      options.push(args[index]);
+    }
+    index += 1;
+  }
+
+  return { options, index };
+}
+
+function hasValueOption(args, names) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const name = optionName(arg);
+    if (names.has(name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function configAssignmentKey(value) {
+  const match = String(value || "")
+    .trim()
+    .match(/^([A-Za-z0-9_.-]+)\s*=/u);
+  return match?.[1] || "";
+}
+
+function hasConfigAssignment(args, key) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if ((arg === "-c" || arg === "--config") && args[index + 1]) {
+      if (configAssignmentKey(args[index + 1]) === key) {
+        return true;
+      }
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--config=") && configAssignmentKey(arg.slice("--config=".length)) === key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function configAssignmentValue(args, key) {
+  let value = "";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if ((arg === "-c" || arg === "--config") && args[index + 1]) {
+      const assignment = args[index + 1];
+      if (configAssignmentKey(assignment) === key) {
+        value = parseTomlScalarString(assignment.slice(assignment.indexOf("=") + 1));
+      }
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--config=")) {
+      const assignment = arg.slice("--config=".length);
+      if (configAssignmentKey(assignment) === key) {
+        value = parseTomlScalarString(assignment.slice(assignment.indexOf("=") + 1));
+      }
+    }
+  }
+  return value;
+}
+
+function withoutConfigAssignment(args, key) {
+  const filtered = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if ((arg === "-c" || arg === "--config") && args[index + 1]) {
+      if (configAssignmentKey(args[index + 1]) === key) {
+        index += 1;
+        continue;
+      }
+      filtered.push(arg, args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--config=") && configAssignmentKey(arg.slice("--config=".length)) === key) {
+      continue;
+    }
+    filtered.push(arg);
+  }
+  return filtered;
+}
+
+function withoutValueOptions(args, names) {
+  const filtered = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const name = optionName(arg);
+    if (names.has(name)) {
+      if (!arg.includes("=") && index + 1 < args.length) {
+        index += 1;
+      }
+      continue;
+    }
+    filtered.push(arg);
+  }
+  return filtered;
+}
+
+function normalizedNonEmptyString(value) {
+  const normalized = String(value || "").trim();
+  return normalized || "";
+}
+
+function serviceTierFromFastMode(fastMode) {
+  if (fastMode === true) {
+    return "fast";
+  }
+  return "";
+}
+
+function taskFastModeFromArgs(args) {
+  return taskFastModeFromServiceTier(configAssignmentValue(args, "service_tier"));
+}
+
+function applySessionTaskState(args, sessionState) {
+  const prefix = [];
+  let rest = [...args];
+
+  const model = normalizedNonEmptyString(sessionState?.taskModel);
+  if (model) {
+    rest = withoutConfigAssignment(withoutValueOptions(rest, new Set(["-m", "--model"])), "model");
+    prefix.push("--model", model);
+  }
+
+  const profile = normalizedNonEmptyString(sessionState?.taskProfile);
+  if (profile) {
+    rest = withoutConfigAssignment(withoutValueOptions(rest, new Set(["-p", "--profile"])), "profile");
+    prefix.push("--profile", profile);
+  }
+
+  const effort = normalizeTaskEffort(sessionState?.taskEffort);
+  if (effort) {
+    rest = withoutConfigAssignment(rest, "model_reasoning_effort");
+    prefix.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+  }
+
+  if (sessionState?.taskFastMode === true || sessionState?.taskFastMode === false) {
+    const serviceTier = serviceTierFromFastMode(sessionState.taskFastMode);
+    rest = withoutConfigAssignment(rest, "service_tier");
+    if (serviceTier) {
+      prefix.push("-c", `service_tier=${JSON.stringify(serviceTier)}`);
+    }
+  }
+
+  return prefix.length > 0 ? [...prefix, ...rest] : args;
+}
+
+function shouldPinTaskDefaults(args) {
+  const leading = splitLeadingOptions(args, 0, globalValueOptions);
+  const command = args[leading.index] || null;
+  return !command || command === "exec" || command === "e" || command === "resume" || command === "review";
+}
+
+function taskDefaultArgsFromAccount(account, args) {
+  if (!shouldPinTaskDefaults(args)) {
+    return [];
+  }
+
+  const values = readTopLevelTomlStrings(
+    path.join(account.home, "config.toml"),
+    new Set(["model", "profile", "model_reasoning_effort"]),
+  );
+  const pinned = [];
+  if (values.model && !hasValueOption(args, new Set(["-m", "--model"])) && !hasConfigAssignment(args, "model")) {
+    pinned.push("--model", values.model);
+  }
+  if (values.profile && !hasValueOption(args, new Set(["-p", "--profile"])) && !hasConfigAssignment(args, "profile")) {
+    pinned.push("--profile", values.profile);
+  }
+  if (values.model_reasoning_effort && !hasConfigAssignment(args, "model_reasoning_effort")) {
+    pinned.push("-c", `model_reasoning_effort=${JSON.stringify(values.model_reasoning_effort)}`);
+  }
+  return pinned;
+}
+
+function pinTaskDefaultsFromAccount(args, account) {
+  const pinned = taskDefaultArgsFromAccount(account, args);
+  return pinned.length > 0 ? [...pinned, ...args] : args;
+}
+
+function normalizeTaskEffort(value) {
+  const normalized = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "fast") {
+    return "low";
+  }
+  if (normalized === "slow") {
+    return "xhigh";
+  }
+  if (["minimal", "low", "medium", "high", "xhigh"].includes(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
+function taskEffortFromSlashText(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (/^\/slow(?:\s|$)/u.test(normalized)) {
+    return "xhigh";
+  }
+  return "";
+}
+
+function normalizeTaskFastMode(value) {
+  if (value === true || value === false) {
+    return value;
+  }
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/_/g, "-");
+  if (!normalized) {
+    return null;
+  }
+  if (["1", "true", "yes", "on", "enable", "enabled", "fast", "priority"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "disable", "disabled", "auto", "default", "standard", "standard-only"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function taskFastModeFromServiceTier(value) {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/_/g, "-");
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "priority" || normalized === "fast") {
+    return true;
+  }
+  if (["auto", "default", "standard", "standard-only"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function firstKnownFastMode(...values) {
+  for (const value of values) {
+    if (value === true || value === false) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function taskStateFromSlashText(text, currentFastMode = null) {
+  const normalized = String(text || "").trim().toLowerCase();
+  const fast = normalized.match(/^\/fast(?:\s+([^\s]+))?(?:\s|$)/u);
+  if (fast) {
+    const mode = fast[1] || "";
+    if (!mode) {
+      return { fastMode: currentFastMode === true ? false : true };
+    }
+    if (mode === "status") {
+      return {};
+    }
+    const fastMode = normalizeTaskFastMode(mode);
+    return fastMode === null ? {} : { fastMode };
+  }
+
+  const effort = taskEffortFromSlashText(normalized);
+  return effort ? { effort, fastMode: false } : {};
+}
+
+function textFromUserPayload(payload) {
+  if (payload?.type === "user_message") {
+    return payload.message || "";
+  }
+  if (payload?.type !== "message" || payload.role !== "user" || !Array.isArray(payload.content)) {
+    return "";
+  }
+  return payload.content
+    .map((item) => (item?.type === "input_text" || item?.type === "text" ? item.text || "" : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function taskEffortFromTurnContext(payload) {
+  return normalizeTaskEffort(
+    payload?.effort ||
+      payload?.reasoning_effort ||
+      payload?.reasoningEffort ||
+      payload?.collaboration_mode?.settings?.reasoning_effort ||
+      payload?.collaboration_mode?.settings?.reasoningEffort,
+  );
+}
+
+function taskStateFromTurnContext(payload) {
+  const collaborationMode = payload?.collaboration_mode || payload?.collaborationMode || {};
+  const settings = collaborationMode.settings || {};
+  const modeName = String(collaborationMode.mode || collaborationMode.name || collaborationMode.id || "").trim().toLowerCase();
+  return {
+    model: normalizedNonEmptyString(payload?.model || payload?.model_id || payload?.modelId || settings.model),
+    profile: normalizedNonEmptyString(payload?.profile || settings.profile),
+    effort: taskEffortFromTurnContext(payload),
+    fastMode: firstKnownFastMode(
+      normalizeTaskFastMode(payload?.fast_mode),
+      normalizeTaskFastMode(payload?.fastMode),
+      taskFastModeFromServiceTier(payload?.service_tier),
+      taskFastModeFromServiceTier(payload?.serviceTier),
+      normalizeTaskFastMode(settings.fast_mode),
+      normalizeTaskFastMode(settings.fastMode),
+      taskFastModeFromServiceTier(settings.service_tier),
+      taskFastModeFromServiceTier(settings.serviceTier),
+      modeName === "fast" ? true : null,
+    ),
+  };
+}
+
+function applyTaskContextState(state, taskState) {
+  if (taskState.model) {
+    state.taskModel = taskState.model;
+  }
+  if (taskState.profile) {
+    state.taskProfile = taskState.profile;
+  }
+  if (taskState.effort) {
+    state.taskEffort = taskState.effort;
+  }
+  if (taskState.fastMode === true || taskState.fastMode === false) {
+    state.taskFastMode = taskState.fastMode;
+  }
+}
+
+function filterOptions(args, supportedOptions, valueOptions) {
+  const filtered = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const name = optionName(arg);
+    const supported = supportedOptions.has(name);
+
+    if (supported) {
+      filtered.push(arg);
+    }
+    if (!arg.includes("=") && valueOptions.has(name) && index + 1 < args.length) {
+      index += 1;
+      if (supported) {
+        filtered.push(args[index]);
+      }
+    }
+  }
+  return filtered;
+}
+
+function hasOption(args, name) {
+  return args.some((arg) => optionName(arg) === name);
+}
+
+function isResumeInvocation(args) {
+  const leading = splitLeadingOptions(args, 0, globalValueOptions);
+  const command = args[leading.index] || null;
+  if (command === "resume") {
+    return true;
+  }
+  if (command !== "exec" && command !== "e") {
+    return false;
+  }
+  const execOptions = splitLeadingOptions(args, leading.index + 1, execAnalyzeValueOptions);
+  return args[execOptions.index] === "resume";
+}
+
+function filterResumePassthroughOptions(args) {
+  return args.filter((arg) => optionName(arg) !== "--last");
+}
+
+function resumeTargetFromOptionsAndRest(options, rest) {
+  const useLast = hasOption(options, "--last") || rest.length === 0;
+  return {
+    prompt: useLast ? rest.join(" ") || null : rest.slice(1).join(" ") || null,
+    resumeTargetArgs: useLast ? ["--last"] : [rest[0]],
+  };
+}
+
+function analyzeCodexArgs(args) {
+  // Codex exec accepts these global policies after its subcommand. Move them
+  // before exec/resume so retries cannot drop them or misread their values.
+  const initial = splitLeadingOptions(args, 0, globalValueOptions);
+  if (["exec", "e", "resume"].includes(args[initial.index])) {
+    const moved = [];
+    const rest = [];
+    const valueNames = new Set(["--sandbox", "-s", "--ask-for-approval", "-a", "--cd", "-C", "--config", "-c"]);
+    const flagNames = new Set(["--full-auto"]);
+    const body = args.slice(initial.index + 1);
+    for (let i = 0; i < body.length; i++) {
+      const arg = body[i];
+      if (arg === "--") { rest.push(...body.slice(i)); break; }
+      if (!arg.startsWith("-")) { rest.push(arg); continue; }
+      const name = optionName(arg);
+      if (valueNames.has(name) || flagNames.has(name)) {
+        moved.push(arg);
+        if (valueNames.has(name) && !arg.includes("=") && body[i + 1]) moved.push(body[++i]);
+      } else {
+        rest.push(arg);
+        if (execAnalyzeValueOptions.has(name) && !arg.includes("=") && body[i + 1]) rest.push(body[++i]);
+      }
+    }
+    if (moved.length) args = [...initial.options, ...moved, args[initial.index], ...rest];
+  }
+  const leading = splitLeadingOptions(args, 0, globalValueOptions);
+  const command = args[leading.index] || null;
+
+  if (command === "exec" || command === "e") {
+    const execOptions = splitLeadingOptions(args, leading.index + 1, execAnalyzeValueOptions);
+    const execCommand = args[execOptions.index] || null;
+    if (execCommand === "resume") {
+      const resumeOptions = splitLeadingOptions(args, execOptions.index + 1, execResumeValueOptions);
+      const allResumeOptions = [...execOptions.options, ...resumeOptions.options];
+      const rest = args.slice(resumeOptions.index);
+      const resumeTarget = resumeTargetFromOptionsAndRest(allResumeOptions, rest);
+
+      return {
+        mode: "exec",
+        globalArgs: leading.options,
+        resumeOptions: filterOptions(
+          filterResumePassthroughOptions(allResumeOptions),
+          execResumeSupportedOptions,
+          execAnalyzeValueOptions,
+        ),
+        ...resumeTarget,
+      };
+    }
+
+    const prompt =
+      execCommand && execSubcommands.has(execCommand) ? null : args.slice(execOptions.index).join(" ") || null;
+    return {
+      mode: "exec",
+      globalArgs: leading.options,
+      resumeOptions: filterOptions(execOptions.options, execResumeSupportedOptions, execAnalyzeValueOptions),
+      resumeTargetArgs: ["--last"],
+      prompt,
+    };
+  }
+
+  if (command === "resume") {
+    const resumeOptions = splitLeadingOptions(args, leading.index + 1, globalValueOptions);
+    const rest = args.slice(resumeOptions.index);
+    const resumeTarget = resumeTargetFromOptionsAndRest(resumeOptions.options, rest);
+    return {
+      mode: "interactive",
+      globalArgs: leading.options,
+      resumeOptions: filterResumePassthroughOptions(resumeOptions.options),
+      ...resumeTarget,
+    };
+  }
+
+  if (command && codexSubcommands.has(command)) {
+    return {
+      mode: "interactive",
+      globalArgs: leading.options,
+      resumeOptions: [],
+      resumeTargetArgs: ["--last"],
+      prompt: null,
+    };
+  }
+
+  return {
+    mode: "interactive",
+    globalArgs: leading.options,
+    resumeOptions: [],
+    resumeTargetArgs: ["--last"],
+    prompt: args.slice(leading.index).join(" ") || null,
+  };
+}
+
+function findLatestSessionFile(accountHome, options = {}) {
+  const root = path.join(accountHome, "sessions");
+  const minMtimeMs = options.minMtimeMs || 0;
+  const cwd = options.cwd ? path.resolve(options.cwd) : null;
+  const stack = [root];
+  let latest = null;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const target = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(target);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+
+      let stat;
+      try {
+        stat = fs.statSync(target);
+      } catch {
+        continue;
+      }
+      if (options.sessionId && readSessionMeta(target).id !== options.sessionId) continue;
+      if (stat.mtimeMs < minMtimeMs) {
+        continue;
+      }
+      if (!latest || stat.mtimeMs > latest.mtimeMs) {
+        if (cwd) {
+          const meta = readSessionMeta(target);
+          if (!meta.cwd || path.resolve(meta.cwd) !== cwd) {
+            continue;
+          }
+        }
+        latest = { file: target, mtimeMs: stat.mtimeMs };
+      }
+    }
+  }
+
+  return latest?.file || null;
+}
+
+function readSessionMeta(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(1024 * 1024);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/, 1)[0];
+    if (!firstLine.trim()) {
+      return {};
+    }
+
+    const event = JSON.parse(firstLine);
+    const payload = event.payload || event;
+    if (event.type !== "session_meta" && payload.type !== "session_meta") {
+      return {};
+    }
+    return {
+      id: payload.id || null,
+      cwd: payload.cwd || null,
+    };
+  } catch {
+    return {};
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close failures while reading optional metadata.
+      }
+    }
+  }
+}
+
+function sessionIdFromFileName(file) {
+  const match = path
+    .basename(file || "")
+    .match(/(?:^|-)rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
+  return match?.[1] || null;
+}
+
+function tokenCountHasUsageLimit(payload) {
+  const rateLimits = payload?.rate_limits;
+  if (!rateLimits) {
+    return false;
+  }
+  if (rateLimits.credits?.has_credits === false) {
+    return true;
+  }
+  if (rateLimits.rate_limit_reached_type) {
+    return true;
+  }
+  return false;
+}
+
+function latestSessionTurnState(accountHome, options = {}) {
+  const file = options.file || findLatestSessionFile(accountHome, options);
+  if (!file) {
+    return { file: null, incomplete: false };
+  }
+  const meta = readSessionMeta(file);
+
+  const state = {
+    file,
+    sessionId: meta.id || sessionIdFromFileName(file) || null,
+    cwd: meta.cwd || null,
+    activeTurn: false,
+    sawUser: false,
+    sawAssistant: false,
+    sawWork: false,
+    completed: false,
+    lastAgentMessage: null,
+    usageLimited: false,
+    taskModel: "",
+    taskProfile: "",
+    taskEffort: "",
+    taskFastMode: options.initialTaskFastMode === true || options.initialTaskFastMode === false ? options.initialTaskFastMode : null,
+  };
+
+  let lines;
+  try {
+    lines = fs.readFileSync(file, "utf8").trimEnd().split("\n");
+  } catch {
+    return { file, incomplete: false };
+  }
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const payload = event.payload || event;
+    if (event.type === "turn_context") {
+      applyTaskContextState(state, taskStateFromTurnContext(payload));
+    }
+
+    applyTaskContextState(state, taskStateFromSlashText(textFromUserPayload(payload), state.taskFastMode));
+
+    if (event.type === "event_msg" && payload.type === "task_started") {
+      state.activeTurn = true;
+      state.sawUser = false;
+      state.sawAssistant = false;
+      state.sawWork = false;
+      state.completed = false;
+      state.lastAgentMessage = null;
+      state.usageLimited = false;
+      continue;
+    }
+    if (event.type === "event_msg" && payload.type === "task_complete") {
+      state.completed = true;
+      state.lastAgentMessage = payload.last_agent_message || null;
+      if (state.lastAgentMessage) {
+        state.sawAssistant = true;
+      }
+      continue;
+    }
+
+    if (!state.activeTurn) {
+      continue;
+    }
+
+    if (
+      (event.type === "response_item" && payload.type === "message" && payload.role === "user") ||
+      (event.type === "event_msg" && payload.type === "user_message")
+    ) {
+      state.sawUser = true;
+    } else if (event.type === "response_item" && payload.type === "message" && payload.role === "assistant") {
+      state.sawAssistant = true;
+    } else if (
+      event.type === "response_item" &&
+      ["function_call", "custom_tool_call", "local_shell_call"].includes(payload.type)
+    ) {
+      state.sawWork = true;
+    } else if (event.type === "event_msg" && payload.type === "agent_message") {
+      state.sawAssistant = true;
+    } else if (event.type === "event_msg" && payload.type === "token_count" && tokenCountHasUsageLimit(payload)) {
+      state.usageLimited = true;
+    }
+  }
+
+  const sawTurnContent = state.sawUser || state.sawAssistant || state.sawWork;
+  const completedByUsageLimit =
+    state.completed &&
+    state.sawUser &&
+    !state.lastAgentMessage &&
+    (state.usageLimited || options.assumeUsageLimited);
+
+  return {
+    ...state,
+    incomplete: state.activeTurn && ((!state.completed && sawTurnContent) || completedByUsageLimit),
+  };
+}
+
+function retryTargetFromSession(analysis, sessionState) {
+  if (!sessionState.sessionId) {
+    return analysis;
+  }
+
+  const targetArgs = analysis.resumeTargetArgs || ["--last"];
+  const currentTarget = targetArgs[0];
+  if (currentTarget && currentTarget !== "--last") {
+    return analysis;
+  }
+
+  return { ...analysis, resumeTargetArgs: [sessionState.sessionId] };
+}
+
+function resumeArgsFromAnalysis(analysis, prompt) {
+  if (analysis.mode === "exec") {
+    return [
+      ...analysis.globalArgs,
+      "exec",
+      "resume",
+      ...analysis.resumeOptions,
+      ...(analysis.resumeTargetArgs || ["--last"]),
+      ...(prompt ? [prompt] : []),
+    ];
+  }
+
+  return [
+    ...analysis.globalArgs,
+    "resume",
+    ...analysis.resumeOptions,
+    ...(analysis.resumeTargetArgs || ["--last"]),
+    ...(prompt ? [prompt] : []),
+  ];
+}
+
+function sessionRelativePath(accountHome, file) {
+  if (!file) {
+    return null;
+  }
+  const root = path.join(accountHome, "sessions");
+  const relative = path.relative(root, file);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !relative.endsWith(".jsonl")) {
+    return null;
+  }
+  return relative;
+}
+
+function retrySessionFromState(accountHome, sessionState) {
+  const relativePath = sessionRelativePath(accountHome, sessionState.file);
+  if (!relativePath) {
+    return null;
+  }
+  return {
+    sourceHome: accountHome,
+    file: sessionState.file,
+    relativePath,
+    sessionId: sessionState.sessionId || null,
+  };
+}
+
+function ensureRetrySessionAvailable(retrySession, account) {
+  if (!retrySession?.file || !retrySession.relativePath) {
+    return;
+  }
+
+  const targetFile = path.join(account.home, "sessions", retrySession.relativePath);
+  if (fs.existsSync(targetFile)) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+    fs.copyFileSync(retrySession.file, targetFile, fs.constants.COPYFILE_EXCL);
+    console.error(`[cx-auto] copied interrupted session to ${account.name}.`);
+  } catch (error) {
+    if (fs.existsSync(targetFile)) {
+      return;
+    }
+    console.error(`[cx-auto] session sync failed for ${account.name}: ${error.message}`);
+  }
+}
+
+function execResumeArgsFromInteractiveAnalysis(analysis, prompt) {
+  const resumeOptions = filterOptions(analysis.resumeOptions, execResumeSupportedOptions, execAnalyzeValueOptions);
+  return [
+    ...analysis.globalArgs,
+    "exec",
+    "resume",
+    ...resumeOptions,
+    ...(analysis.resumeTargetArgs || ["--last"]),
+    ...(prompt ? [prompt] : []),
+  ];
+}
+
+function interactiveResumePromptNeedsExecFallback(analysis, prompt) {
+  const targetArgs = analysis.resumeTargetArgs || ["--last"];
+  return Boolean(prompt && analysis.mode === "interactive" && targetArgs[0] === "--last");
+}
+
+function cwdFromGlobalArgs(globalArgs) {
+  let cwd = process.cwd();
+  for (let index = 0; index < globalArgs.length; index += 1) {
+    const arg = globalArgs[index];
+    if (arg === "-C" || arg === "--cd") {
+      if (globalArgs[index + 1]) {
+        cwd = expandHomePath(globalArgs[index + 1]);
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--cd=")) {
+      cwd = expandHomePath(arg.slice("--cd=".length));
+    }
+  }
+  return path.resolve(cwd);
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function resolveResumeThreadId(accountHome, analysis) {
+  const targetArgs = analysis.resumeTargetArgs || ["--last"];
+  const target = targetArgs[0];
+  if (target && target !== "--last") {
+    return isUuidLike(target) ? target : null;
+  }
+
+  const file = findLatestSessionFile(accountHome, {
+    cwd: hasOption(analysis.resumeOptions || [], "--all") ? null : cwdFromGlobalArgs(analysis.globalArgs || []),
+  });
+  return file ? readSessionMeta(file).id || null : null;
+}
+
+function shouldResumeGoalStatus(status) {
+  return status === "paused" || status === "usageLimited" || status === "blocked";
+}
+
+async function resumeGoalIfNeeded(account, codexArgs) {
+  if (process.env.CX_AUTO_RESUME_GOAL === "0" || !isResumeInvocation(codexArgs)) {
+    return;
+  }
+
+  const analysis = analyzeCodexArgs(codexArgs);
+  const threadId = resolveResumeThreadId(account.home, analysis);
+  if (!threadId) {
+    return;
+  }
+
+  let result;
+  try {
+    result = await appServerRequest(account.home, "thread/goal/get", { threadId });
+  } catch (error) {
+    console.error(`[cx-auto] goal status check failed: ${error.message}`);
+    return;
+  }
+
+  const goal = result?.goal || null;
+  if (!goal || !shouldResumeGoalStatus(goal.status)) {
+    return;
+  }
+
+  try {
+    await appServerRequest(account.home, "thread/goal/set", { threadId, status: "active" });
+    console.error(`[cx-auto] resumed ${goal.status} goal for ${threadId}.`);
+  } catch (error) {
+    console.error(`[cx-auto] goal resume failed: ${error.message}`);
+  }
+}
+
+function retryPlanAfterRateLimit(previousArgs, accountHome, options = {}) {
+  const analysis = analyzeCodexArgs(previousArgs);
+  const sessionState = latestSessionTurnState(accountHome, {
+    ...options,
+    assumeUsageLimited: true,
+    initialTaskFastMode: taskFastModeFromArgs(previousArgs),
+  });
+
+  if (!sessionState.file) {
+    return { args: [...previousArgs], session: null };
+  }
+
+  const retryAnalysis = options.sessionId
+    ? { ...analysis, resumeTargetArgs: [options.sessionId] }
+    : retryTargetFromSession(analysis, sessionState);
+  const retrySession = retrySessionFromState(accountHome, sessionState);
+  let prompt = null;
+  if (sessionState.incomplete) {
+    prompt = continuationPrompt;
+    if (
+      retryAnalysis.mode === "interactive" &&
+      (process.env.CX_INTERACTIVE_AUTO_EXEC === "1" || interactiveResumePromptNeedsExecFallback(retryAnalysis, prompt))
+    ) {
+      return { args: applySessionTaskState(execResumeArgsFromInteractiveAnalysis(retryAnalysis, prompt), sessionState), session: retrySession };
+    }
+  } else if (!sessionState.completed && analysis.prompt) {
+    if (analysis.mode === "interactive") {
+      return { args: applySessionTaskState([...previousArgs], sessionState), session: retrySession };
+    }
+    prompt = analysis.prompt;
+  }
+
+  return { args: applySessionTaskState(resumeArgsFromAnalysis(retryAnalysis, prompt), sessionState), session: retrySession };
+}
+
+function retryArgsAfterRateLimit(previousArgs, accountHome, options = {}) {
+  return retryPlanAfterRateLimit(previousArgs, accountHome, options).args;
+}
+
+async function probeAccounts(excludedNames = new Set(), options = {}) {
+  const activeNames = options.activeNames || getActiveAccountNames();
+  const accounts = getDefaultAccounts().filter((account) => !excludedNames.has(account.name));
+  const results = await Promise.all(accounts.map((account) => readRateLimits(account)));
+  for (const result of results) {
+    result.active = activeNames.has(result.account.name);
+  }
+  return results;
+}
+
+function validLocalAccountLabel(value) {
+  return typeof value === "string" && /^[A-Z]{1,8}$/.test(value) &&
+    !["S","SAVE","LOGIN","STATUS","BUZZ","AUTO","QUOTA","WEB","ACCOUNTS","REMOVE"].includes(value);
+}
+
+function localThresholds() {
+  const file = process.env.CX_LOCAL_THRESHOLD_FILE;
+  if (!file) return {};
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) return null;
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (data?.version !== 1 || !data.thresholds || typeof data.thresholds !== "object" || Array.isArray(data.thresholds)) return null;
+    const weekly=data.weekly_thresholds ?? {};
+    if (!weekly || typeof weekly !== "object" || Array.isArray(weekly)) return null;
+    if ([data.thresholds,weekly].some(items=>Object.entries(items).some(([k,v]) => !validLocalAccountLabel(k) || !Number.isInteger(v) || v < 0 || v > 99))) return null;
+    return {...data.thresholds,__weekly:weekly};
+  } catch (error) { return error.code === "ENOENT" ? {} : null; }
+}
+
+function belowReserve(result, thresholds) {
+  const name=result?.account?.name;
+  return [[thresholds?.[name] || 0,fiveHourQuotaBucket(result?.limits)],
+          [thresholds?.__weekly?.[name] || 0,weeklyQuotaBucket(result?.limits)]].some(([threshold,bucket])=>{
+    const used=rawUsedPercent(bucket);
+    return Boolean(threshold > 0 && result?.ok && Number.isFinite(used) && used >= 0 && used <= 100 && 100 - used <= threshold);
+  });
+}
+
+function applyReserveThresholds(results, thresholds) {
+  return results.map(result => {
+    const name=result?.account?.name;
+    const checks=[["5h",thresholds?.[name] || 0,fiveHourQuotaBucket(result?.limits)],
+                  ["weekly",thresholds?.__weekly?.[name] || 0,weeklyQuotaBucket(result?.limits)]];
+    for (const [window,threshold,bucket] of checks) {
+      const used=rawUsedPercent(bucket);
+      if (result?.ok && threshold > 0 && (!Number.isFinite(used) || used < 0 || used > 100))
+        return {...result,ok:false,error:`${window} quota unknown while reserve is enabled`};
+    }
+    return belowReserve(result, thresholds)
+      ? {...result, ok: false, error: "5h or weekly remaining at or below reserve threshold"}
+      : result;
+  });
+}
+
+function describeSelection(result, prefix = "cx-auto") {
+  const limit = result.limits;
+  const auth = result.authMode === "apikey" ? "api-key" : "account";
+  console.error(
+    `[${prefix}] selected ${accountDisplayName(result.account)} [${auth}]: weekly used ${formatOptionalPercent(usedPercent(limit))}`,
+  );
+}
+
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_./:=+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function installSignalForwarding() {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(signal, () => {
+      terminating = true;
+      for (const probe of probeChildren) { if (!probe.killed) probe.kill(signal); }
+      if (activeChild && !activeChild.killed) {
+        activeChild.kill(signal);
+      }
+    });
+  }
+}
+
+function removeDirQuietly(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup; the OS clears tmpfs on reboot anyway.
+  }
+}
+
+function restoreTerminal() {
+  if (process.stdout.isTTY) {
+    process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1049l\x1b[?25h\x1b[0m\n");
+  }
+}
+
+function isUsageLimitLogLine(line) {
+  const trimmed = line.trim();
+  if (!rateLimitTextPattern.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes("ToolCall:") || trimmed.includes("codex_core::stream_events_utils")) {
+    return false;
+  }
+  if (nonAccountRateLimitPattern.test(trimmed)) {
+    return false;
+  }
+  if (rateLimitUiPattern.test(trimmed)) {
+    return true;
+  }
+  if (turnErrorRateLimitPattern.test(trimmed)) {
+    return true;
+  }
+  if (structuredGoalUsageLimitPattern.test(trimmed)) {
+    return true;
+  }
+  if (turnErrorHttpRateLimitPattern.test(trimmed)) {
+    return true;
+  }
+  return logLevelLinePattern.test(trimmed) && rateLimitReasonPattern.test(trimmed);
+}
+
+const modelCapacityReasonPattern = /^Selected model is at capacity(?:[.!]|$)/i;
+
+function isModelCapacityLogLine(line) {
+  const trimmed = line.trim();
+  if (trimmed.includes("ToolCall:") || trimmed.includes("codex_core::stream_events_utils") || nonAccountRateLimitPattern.test(trimmed)) return false;
+  if (/^■\s*/.test(trimmed)) return modelCapacityReasonPattern.test(trimmed.replace(/^■\s*/, ""));
+  const error = trimmed.match(/\bTurn error:\s*(.*)$/i);
+  return Boolean(error && logLevelLinePattern.test(trimmed) && modelCapacityReasonPattern.test(error[1]));
+}
+
+function logChunkHasUsageLimit(chunk) {
+  return chunk.split(/\r?\n/).some(isUsageLimitLogLine);
+}
+
+function runCodex(account, commandArgs) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, CODEX_HOME: account.home, CODEX_TRUST_ALL: "0" };
+    delete env.CODEX_THREAD_ID;
+
+    const child = spawn("codex", commandArgs, { env, stdio: "inherit" });
+    activeChild = child;
+    child.on("exit", (code, signal) => {
+      activeChild = null;
+      resolve({ code, signal });
+    });
+  });
+}
+
+// Local integration: only this process's log or an explicit UUID identifies its
+// conversation. Shared sessions' newest mtime is never evidence of ownership.
+function ownedSessionId(logFile, codexArgs) {
+  let log = "";
+  try { log = fs.readFileSync(logFile, "utf8"); } catch {}
+  const ids = new Set();
+  for (const match of log.matchAll(/session_loop\{thread_id[=:]"?([0-9a-f-]{36})/gi)) {
+    if (isUuidLike(match[1])) ids.add(match[1]);
+  }
+  if (ids.size === 1) return [...ids][0];
+  if (ids.size > 1) {
+    // Subagents share this log. Resolve only IDs observed here and require a
+    // single persisted CLI root; multiple roots remain ambiguous and stop.
+    const base = process.env.CODEX_MULTI_BASE;
+    if (!base) return null;
+    const owner = spawnSync("python3", [path.resolve(__dirname, "../../..", "session_owner.py"), base, JSON.stringify([...ids])],
+      { encoding: "utf8", timeout: 3000 });
+    const id = owner.status === 0 ? owner.stdout.trim() : "";
+    return isUuidLike(id) && ids.has(id) ? id : null;
+  }
+  const analysis = analyzeCodexArgs(codexArgs);
+  const explicit = analysis.resumeTargetArgs?.[0];
+  return isUuidLike(explicit) ? explicit : null;
+}
+
+// Lifecycle observation is independent of retry analysis: completed or aborted
+// turns are idle, and only this process's exact session may change that state.
+class LocalTurnActivity {
+  constructor(startedAt = Date.now()) {
+    this.startedAt = startedAt;
+    this.generation = 0;
+    this.reset(null);
+  }
+
+  reset(file) {
+    this.file = file;
+    this.identity = null;
+    this.offset = 0;
+    this.pending = Buffer.alloc(0);
+    this.discarding = false;
+    this.oversized = false;
+    this.state = 'unknown';
+    this.ready = false;
+    this.turnId = null;
+    this.mtime = null;
+    this.ctime = null;
+    this.generation += 1;
+  }
+
+  event(event) {
+    const payload = event?.payload;
+    if (!payload || typeof payload !== 'object') return;
+    if (event.type === 'event_msg' && payload.type === 'task_started') {
+      // A resumed transcript can end with a historical interrupted turn. It
+      // isn't running in the new process until a fresh task starts here.
+      const at = Date.parse(event.timestamp || '');
+      this.state = Number.isFinite(at) && at < this.startedAt ? 'idle' : 'active';
+      this.ready = false;
+      this.turnId = payload.turn_id || null;
+      this.generation += 1;
+    } else if (event.type === 'event_msg' && ['task_complete', 'turn_aborted'].includes(payload.type)) {
+      if (this.turnId && payload.turn_id && this.turnId !== payload.turn_id) return;
+      this.state = 'idle';
+      this.ready = false;
+    } else if (this.state === 'active' &&
+      ((event.type === 'event_msg' && ['user_message', 'agent_message'].includes(payload.type)) ||
+       (event.type === 'response_item' &&
+        ((payload.type === 'message' && ['user', 'assistant'].includes(payload.role)) ||
+         ['function_call', 'custom_tool_call', 'local_shell_call'].includes(payload.type))))) {
+      // Don't interrupt in the gap between task_started and persistence of the
+      // submitted input: the existing exact-session retry needs that input.
+      this.ready = true;
+    }
+  }
+
+  read(file, sessionId) {
+    if (file !== this.file || sessionId !== this.sessionId) {
+      this.reset(file);
+      this.sessionId = sessionId;
+    }
+    if (!file) return this.snapshot();
+    let fd;
+    try {
+      fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const stat = fs.fstatSync(fd);
+      const identity = `${stat.dev}:${stat.ino}`;
+      if (!stat.isFile()) throw new Error('Not a transcript');
+      if (identity !== this.identity || stat.size < this.offset ||
+          (stat.size === this.offset && this.mtime !== null &&
+           (stat.mtimeMs !== this.mtime || stat.ctimeMs !== this.ctime))) {
+        this.reset(file);
+        const header = Buffer.alloc(1024*1024);
+        const count = fs.readSync(fd, header, 0, header.length, 0);
+        const meta = JSON.parse(header.subarray(0, count).toString('utf8').split('\n', 1)[0]);
+        if (!sessionId || meta?.type !== 'session_meta' || meta?.payload?.id !== sessionId) throw new Error('Wrong transcript');
+        this.identity = identity;
+        // Lifecycle events near the tail are enough to prove idle. If no
+        // complete event is found, remain unknown and retain the hard stop.
+        this.offset = Math.max(0, stat.size - 1024*1024);
+        this.discarding = this.offset > 0;
+      }
+      const budget = Math.min(stat.size-this.offset, 4*1024*1024);
+      let remaining = budget;
+      while (remaining > 0) {
+        const buffer = Buffer.alloc(Math.min(remaining, 128*1024));
+        const count = fs.readSync(fd, buffer, 0, buffer.length, this.offset);
+        if (!count) break;
+        this.offset += count;
+        remaining -= count;
+        const chunk = Buffer.concat([this.pending, buffer.subarray(0, count)]);
+        let start = 0;
+        for (let end = chunk.indexOf(10); end !== -1; end = chunk.indexOf(10, start)) {
+          const line = chunk.subarray(start, end);
+          if (!this.discarding && line.length <= 1024*1024) {
+            try { this.event(JSON.parse(line.toString('utf8'))); } catch {}
+          } else if ((this.oversized || line.length > 1024*1024) && this.state === 'active' && !this.ready) {
+            // A large user record can exceed the incremental buffer. Only
+            // after its newline is persisted, reuse exact-file retry parsing
+            // once to prove that the current turn has recoverable content.
+            const saved = latestSessionTurnState(null, {file});
+            this.ready = Boolean(saved.incomplete && (saved.sawUser || saved.sawAssistant || saved.sawWork));
+          }
+          this.discarding = false;
+          this.oversized = false;
+          start = end+1;
+        }
+        this.pending = chunk.subarray(start);
+        if (this.pending.length > 1024*1024) {
+          this.pending = Buffer.alloc(0);
+          this.discarding = true;
+          this.oversized = true;
+        }
+      }
+      const after = fs.statSync(file);
+      if (after.dev !== stat.dev || after.ino !== stat.ino || after.size < this.offset) throw new Error('Transcript replaced');
+      this.mtime = stat.mtimeMs;
+      this.ctime = stat.ctimeMs;
+      // Don't trust an old idle marker while newer input is partially read.
+      if (this.offset < after.size || this.pending.length || this.discarding) return this.snapshot('unknown');
+      return this.snapshot();
+    } catch {
+      this.reset(file);
+      return this.snapshot();
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+
+  snapshot(state = this.state) {
+    return { state, ready: this.ready, generation: this.generation,
+      deferThreshold: this.state === 'idle' || (this.state === 'active' && !this.ready) };
+  }
+}
+
+function runCodexMonitored(account, commandArgs, logDir, excludedNames = new Set()) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const env = { ...process.env, CODEX_HOME: account.home, CODEX_TRUST_ALL: "0" };
+    delete env.CODEX_THREAD_ID;
+    const proofFile = path.join(logDir, 'session-owner.json');
+    const proofNonce = require('crypto').randomUUID();
+    env.CX_LOCAL_SESSION_PROOF = proofFile;
+    env.CX_LOCAL_SESSION_NONCE = proofNonce;
+    env.CX_LOCAL_SESSION_KIND = analyzeCodexArgs(commandArgs).mode === 'exec' ? 'exec' : 'cli';
+
+    const captureJson = analyzeCodexArgs(commandArgs).mode === "exec" && hasOption(commandArgs, "--json");
+    const child = spawn("codex", commandArgs, { env, stdio: captureJson ? ["inherit", "pipe", "inherit"] : "inherit" });
+    activeChild = child;
+    let jsonBuffer = "";
+    let jsonSessionId = null;
+    if (captureJson) {
+      child.stdout.on("data", chunk => {
+        process.stdout.write(chunk);
+        jsonBuffer += chunk.toString();
+        const lines = jsonBuffer.split(/\r?\n/);
+        jsonBuffer = lines.pop() || "";
+        for (const line of lines) {
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          if (event.type === "thread.started" && isUuidLike(event.thread_id)) jsonSessionId = event.thread_id;
+          if (event.type === "error" || event.type === "turn.failed") {
+            const message = event.message || event.error?.message || "";
+            if (rateLimitReasonPattern.test(message) || /usage_limit_reached/.test(message)) rateLimited = true;
+            if (!capacityLimited && modelCapacityReasonPattern.test(message)) {
+              capacityLimited = true;
+              console.error("\n[cx-auto] model capacity unavailable; switching account (quota not marked exhausted)...");
+            }
+          }
+        }
+      });
+    }
+
+    const logFile = path.join(logDir, "codex-tui.log");
+    let offset = 0;
+    let pendingLogLine = "";
+    let rateLimited = false;
+    let capacityLimited = false;
+    let thresholdLimited = false;
+    let thresholdProbeBusy = false;
+    let thresholdLastProbe = Date.now();
+    let settled = false;
+    const turnActivity = new LocalTurnActivity(startedAt);
+    let activitySession = null;
+    let activityFile = null;
+    let activityLookupAt = 0;
+    let checkedGeneration = null;
+    let ownerLogStamp;
+    let cachedOwner = null;
+
+    function processOwnership() {
+      try {
+        const selectedProof = fs.existsSync(proofFile+'.final') ? proofFile+'.final' : proofFile;
+        const stat = fs.lstatSync(selectedProof);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192) throw new Error('invalid proof');
+        const proof = JSON.parse(fs.readFileSync(selectedProof, 'utf8'));
+        if (proof.version !== 1 || proof.nonce !== proofNonce || proof.bridge_pid !== child.pid) throw new Error('foreign proof');
+        if (proof.status === 'unique' && isUuidLike(proof.session_id)) {
+          if (jsonSessionId && jsonSessionId !== proof.session_id) return {status:'blocked',reason:'json_process_conflict'};
+          return proof;
+        }
+        return proof;
+      } catch (error) {
+        return error.code === 'ENOENT' ? null : {status:'blocked',reason:'invalid_process_proof'};
+      }
+    }
+
+    function exactSession() {
+      const proof = processOwnership();
+      if (proof?.status === 'unique') return proof.session_id;
+      if (proof?.status === 'blocked') return null;
+      if (proof?.status === 'none') return jsonSessionId;
+      if (['idle','pending'].includes(proof?.status)) return null;
+      return jsonSessionId || ownedSessionId(logFile, commandArgs);
+    }
+
+    function activity() {
+      const proof = processOwnership();
+      if (['idle','pending'].includes(proof?.status)) return {state:'idle',ready:false,generation:0,deferThreshold:true};
+      let owner = proof?.status === 'unique' ? proof.session_id : jsonSessionId;
+      if (proof?.status === 'blocked') owner = null;
+      if (!owner) {
+        let stamp = null;
+        try { const s = fs.statSync(logFile); stamp = `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`; } catch {}
+        if (stamp !== ownerLogStamp) {
+          ownerLogStamp = stamp;
+          cachedOwner = ownedSessionId(logFile, commandArgs);
+        }
+        owner = proof && ['blocked', 'none'].includes(proof.status) ? null : cachedOwner;
+      }
+      if (owner !== activitySession) {
+        activitySession = owner;
+        activityFile = null;
+        activityLookupAt = 0;
+      }
+      if (activityFile && !fs.existsSync(activityFile)) activityFile = null;
+      if (owner && !activityFile && Date.now()-activityLookupAt >= 1000) {
+        activityLookupAt = Date.now();
+        const base = process.env.CODEX_MULTI_BASE;
+        if (base) {
+          const resolved = spawnSync('python3', [path.resolve(__dirname, '../../..', 'session_owner.py'), base, '--rollout', owner],
+            {encoding:'utf8',timeout:3000});
+          if (resolved.status === 0) activityFile = resolved.stdout.trim() || null;
+        }
+        activityFile ||= findLatestSessionFile(account.home, {sessionId:owner});
+      }
+      return turnActivity.read(activityFile, owner);
+    }
+
+    function finish(result) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(timer);
+      activeChild = null;
+      result.capacityLimited = capacityLimited;
+      result.thresholdLimited = thresholdLimited;
+      result.sessionId = exactSession();
+      result.ownership = processOwnership();
+      resolve(result);
+    }
+
+    child.on("error", () => finish({ code: 1, rateLimited: false }));
+
+    function scanLog() {
+      try {
+        const stat = fs.statSync(logFile);
+        if (stat.size <= offset) {
+          return;
+        }
+        const fd = fs.openSync(logFile, "r");
+        try {
+          while (offset < stat.size && !rateLimited && !capacityLimited) {
+            const length = stat.size - offset;
+            const buffer = Buffer.alloc(Math.min(length, 128 * 1024));
+            const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, offset);
+            if (bytesRead <= 0) {
+              break;
+            }
+            offset += bytesRead;
+
+            const chunk = pendingLogLine + buffer.subarray(0, bytesRead).toString("utf8");
+            const lines = chunk.split(/\r?\n/);
+            pendingLogLine = chunk.endsWith("\n") || chunk.endsWith("\r") ? "" : lines.pop() || "";
+            if (pendingLogLine.length > 8192) {
+              pendingLogLine = pendingLogLine.slice(-8192);
+            }
+
+            const usageHit = lines.some(isUsageLimitLogLine) || isUsageLimitLogLine(pendingLogLine);
+            const capacityHit = lines.some(isModelCapacityLogLine) || isModelCapacityLogLine(pendingLogLine);
+            if (usageHit || capacityHit) {
+              rateLimited = usageHit;
+              capacityLimited = !usageHit && capacityHit;
+              console.error(capacityLimited
+                ? "\n[cx-auto] model capacity unavailable; switching account (quota not marked exhausted)..."
+                : "\n[cx-auto] usage limit detected; switching account...");
+              if (!child.killed) {
+                child.kill("SIGTERM");
+                setTimeout(() => {
+                  if (!settled && child.exitCode === null && child.signalCode === null) {
+                    child.kill("SIGKILL");
+                  }
+                }, 5000).unref();
+              }
+            }
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        // The log file may not exist until Codex finishes initialization.
+      }
+    }
+
+    async function scanThreshold() {
+      const thresholds = localThresholds();
+      const threshold = (thresholds?.[account.name] || 0) || (thresholds?.__weekly?.[account.name] || 0);
+      if (settled || terminating || rateLimited || capacityLimited || thresholdLimited || thresholdProbeBusy || !threshold) return;
+      const before = activity();
+      if (before.deferThreshold) return;
+      const newTurn = before.state === 'active' && before.generation !== checkedGeneration;
+      const testInterval = Number(process.env.CX_LOCAL_THRESHOLD_TEST_INTERVAL_MS);
+      const interval = Number.isFinite(testInterval) && testInterval >= 100 ? testInterval : 60000;
+      if (!newTurn && Date.now() - thresholdLastProbe < interval) return;
+      thresholdLastProbe = Date.now();
+      checkedGeneration = before.generation;
+      thresholdProbeBusy = true;
+      try {
+        const current = await readRateLimits(account);
+        const latest = localThresholds();
+        if (settled || terminating || rateLimited || capacityLimited || thresholdLimited || !latest || !belowReserve(current, latest)) return;
+        const after = activity();
+        if (after.deferThreshold ||
+            (before.state === 'active' && after.state !== 'active') ||
+            (after.state === 'active' && (!after.ready || after.generation !== before.generation))) return;
+        // A confirmed threshold stops this owned account immediately. Finding
+        // a replacement and proving session ownership are later resume checks.
+        thresholdLimited = true;
+        console.error(`\n[cx-auto] ${account.name} reached the configured 5h or weekly reserve threshold; stopping current account before checking alternatives...`);
+        if (!child.killed) {
+          child.kill("SIGTERM");
+          setTimeout(() => {if (!settled && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");},5000).unref();
+        }
+      } catch {
+        // Network failures and unreadable quota are not evidence of a threshold breach.
+      } finally { thresholdProbeBusy = false; }
+    }
+
+    const timer = setInterval(() => {scanLog(); void scanThreshold();}, 1000);
+    child.on("close", (code, signal) => {
+      scanLog();
+      finish({ code, signal, rateLimited });
+    });
+  });
+}
+
+async function runForced(options, codexArgs, account) {
+  const commandArgs = [...baseGlobalArgs(options, codexArgs), ...codexArgs];
+  if (options.dryRun) {
+    console.error(`CODEX_HOME=${account.home} codex ${commandArgs.map(shellQuote).join(" ")}`);
+    return 0;
+  }
+
+  if (!options.noTrust) {
+    ensureAccountProjectTrust(account, codexArgs);
+  }
+  await resumeGoalIfNeeded(account, codexArgs);
+  const result = await runCodex(account, commandArgs);
+  if (result.signal && terminating) {
+    return 130;
+  }
+  return result.code ?? 1;
+}
+
+async function runAuto(options, initialArgs) {
+  const accounts = getDefaultAccounts();
+  const { autoMaxSwitches } = getRuntimeConfig();
+  const exhausted = new Set();
+  const attemptedReasons = new Map();
+  let codexArgs = [...initialArgs];
+  let pendingRetrySession = null;
+  let switches = 0;
+  let taskDefaultsPinned = false;
+
+  if (accounts.length < 1) {
+    printNoAccountsConfigured();
+    return 1;
+  }
+
+  if (options.status) {
+    const results = await probeAccounts(exhausted);
+    printStatus(results);
+    return 0;
+  }
+  if (options.quota) {
+    const results = await probeAccounts(exhausted);
+    printQuota(results);
+    return 0;
+  }
+
+  for (;;) {
+    const thresholds = localThresholds();
+    if (thresholds === null) {
+      console.error("[cx-auto] Threshold configuration is invalid; automatic selection stopped.");
+      return 1;
+    }
+    const results = applyReserveThresholds(await probeAccounts(exhausted), thresholds);
+    if (terminating) return 130;
+    const selected = selectResult(results);
+
+    if (!selected || !isUsable(selected)) {
+      printStatus(results);
+      console.error("[cx-auto] No remaining untried candidate accounts are available.");
+      if (attemptedReasons.size) {
+        console.error("[cx-auto] Accounts skipped for this run: " + [...attemptedReasons].map(([name, reason]) => `${name}: ${reason}`).join(", "));
+        console.error("[cx-auto] A new AUTO run checks all accounts again. To continue the same session, use codex-switch auto <session-id>.");
+      }
+      return 1;
+    }
+
+    if (!taskDefaultsPinned) {
+      codexArgs = pinTaskDefaultsFromAccount(codexArgs, selected.account);
+      taskDefaultsPinned = true;
+    }
+
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), `cx-auto-${safeAccountName(selected.account.name)}-`));
+    fs.chmodSync(logDir, 0o700);
+    const logConfigArg = `log_dir=${JSON.stringify(logDir)}`;
+    const commandArgs = [...baseGlobalArgs(options, codexArgs, ["-c", logConfigArg]), ...codexArgs];
+
+    describeSelection(selected);
+
+    if (options.dryRun) {
+      console.error(`CODEX_HOME=${selected.account.home} codex ${commandArgs.map(shellQuote).join(" ")}`);
+      removeDirQuietly(logDir);
+      return 0;
+    }
+
+    if (!options.noTrust) {
+      ensureAccountProjectTrust(selected.account, codexArgs);
+    }
+    ensureRetrySessionAvailable(pendingRetrySession, selected.account);
+    await resumeGoalIfNeeded(selected.account, codexArgs);
+    const runStartedAt = Date.now() - 2000;
+    let result;
+    try {
+      result = await runCodexMonitored(selected.account, commandArgs, logDir, exhausted);
+    } finally {
+      removeDirQuietly(logDir);
+    }
+    if (terminating) {
+      return result.code ?? 130;
+    }
+
+    if (!result.rateLimited && !result.capacityLimited && !result.thresholdLimited) {
+      return result.code ?? 0;
+    }
+
+    restoreTerminal();
+    exhausted.add(selected.account.name);
+    attemptedReasons.set(selected.account.name, result.thresholdLimited ? "5h or weekly reserve threshold" : result.capacityLimited ? "model capacity" : "usage limit");
+    switches += 1;
+
+    if (switches > autoMaxSwitches) {
+      console.error(`[cx-auto] Switch limit reached (${autoMaxSwitches}).`);
+      return 1;
+    }
+
+    if (process.env.CX_LOCAL_SAFE_RESUME === "1" && !result.sessionId) {
+      try {
+        const directory = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'),
+          'codex-switch', 'auto-session-diagnostics');
+        fs.mkdirSync(directory, {recursive:true,mode:0o700});
+        const file = path.join(directory, `${Date.now()}-${process.pid}.json`);
+        fs.writeFileSync(file, JSON.stringify({version:1, reason:result.ownership?.reason || 'no_exact_session_evidence',
+          root_count:result.ownership?.root_count || 0, child_count:result.ownership?.child_count || 0,
+          root_states:result.ownership?.root_states || {}, active_count:result.ownership?.active_count,
+          idle_count:result.ownership?.idle_count,
+          stopped_account:selected.account.name, model_capacity:result.capacityLimited,
+          threshold:result.thresholdLimited}, null, 2)+'\n', {mode:0o600,flag:'wx'});
+        console.error(`[cx-auto] Session ownership diagnostic: ${file}`);
+      } catch {}
+      console.error("[cx-auto] Cannot identify this process's exact session; stopped without resuming another window. Use codex-switch AUTO <session-id>.");
+      return 1;
+    }
+    const retryPlan = retryPlanAfterRateLimit(codexArgs, selected.account.home, {
+      minMtimeMs: result.sessionId ? 0 : runStartedAt,
+      sessionId: result.sessionId,
+    });
+    if (process.env.CX_LOCAL_SAFE_RESUME === "1" && !retryPlan.session) {
+      console.error("[cx-auto] Exact session history is unavailable; automatic replay stopped.");
+      return 1;
+    }
+    codexArgs = retryPlan.args;
+    pendingRetrySession = retryPlan.session;
+  }
+}
+
+async function main() {
+  installSignalForwarding();
+
+  const { options, codexArgs } = parseArgs(process.argv.slice(2));
+  const accounts = getDefaultAccounts();
+  const forced = options.account
+    ? accounts.find((account) => accountMatches(account, options.account, accounts))
+    : null;
+
+  if (options.accountExplicit && !forced) {
+    if (accounts.length < 1) {
+      printNoAccountsConfigured();
+    } else {
+      console.error(`[cx] Unknown account: ${options.account}`);
+      console.error(`[cx] Available selectors: ${accountSelectorHint(accounts)}`);
+    }
+    process.exit(2);
+  }
+
+  const code = options.accountExplicit ? await runForced(options, codexArgs, forced) : await runAuto(options, codexArgs);
+  process.exit(code);
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`[cx] ${error.exitCode ? error.message : error.stack || error.message}`);
+    process.exit(error.exitCode || 1);
+  });
+}
+
+module.exports = {
+  LocalTurnActivity,
+  restoreTerminal,
+  ownedSessionId,
+  fiveHourQuotaBucket,
+  accountAccessTokenExpired,
+  accountMatches,
+  extractAccountEmail,
+  analyzeCodexArgs,
+  compareAccountResults,
+  ensureAccountProjectTrust,
+  ensureTrustedProjectToml,
+  ensureTrustedProjectsForCodexHome,
+  formatProgressPercent,
+  isApiKeyAuth,
+  isApiKeyResult,
+  isUsable,
+  isUsageLimitLogLine,
+  isModelCapacityLogLine,
+  isResumeInvocation,
+  isRetryableRateLimitError,
+  jwtExpiryMs,
+  latestSessionTurnState,
+  limitExhaustedReason,
+  logChunkHasUsageLimit,
+  readSessionMeta,
+  remainingPercent,
+  normalizeReachedReason,
+  normalizeApiKeyMode,
+  retryPlanAfterRateLimit,
+  resolveResumeThreadId,
+  retryArgsAfterRateLimit,
+  reached,
+  shouldResumeGoalStatus,
+  selectResult,
+  taskDefaultArgsFromAccount,
+  pinTaskDefaultsFromAccount,
+  trustedProjectPathsFromCodexArgs,
+  usedPercent,
+};

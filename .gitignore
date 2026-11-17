@@ -1,0 +1,11 @@
+accounts/
+backups/
+.learnings/
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+*.log
+.env*
+auth*.json
+.installed-files

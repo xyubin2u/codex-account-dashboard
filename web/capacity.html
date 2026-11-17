@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>额度测算 · 账户看板</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/usage.css"><link rel="stylesheet" href="/capacity.css"><script src="/capacity.js" defer></script>  <link rel="stylesheet" href="/navigation.css">
+</head>
+<body><div class="shell">
+<header class="masthead dashboard-header"><a class="wordmark" href="/" aria-label="账户看板首页"><span class="brand-icon" aria-hidden="true">⌁</span><span>账户看板</span></a><nav class="dashboard-nav" aria-label="看板导航"><a href="/">账户额度</a><a href="/usage">用量统计</a><a href="/capacity" aria-current="page">额度测算</a></nav></header>
+<main>
+      <div class="platform-picker" role="group" aria-label="统计平台"><button type="button" data-platform="gpt" aria-pressed="false">GPT</button><button type="button" data-platform="agy" aria-pressed="false">AGY</button><button type="button" data-platform="all" aria-pressed="true">合并</button></div>
+<section class="hero"><div><p class="eyebrow">MEASURED THROUGH YOUR WORK</p><h1>一轮额度，能做多少。</h1><p class="intro">随正常使用积累本机样本，观察 Token 与 API 等价价值。</p></div><div class="sync-actions"><button class="button" id="capacity-live" type="button" aria-pressed="true">暂停实时</button><button class="button primary" id="capacity-sync" type="button">同步本机日志</button></div></section>
+<p class="platform-scope" id="platform-scope">GPT + AGY · 同名账号按平台分别测算</p>
+<p class="capacity-basis" id="capacity-basis">你已确认测算期间仅在本机使用。统计包含 2026-11-09 当天；各额度窗口分别测算，不能相加。GPT 按 OpenAI 官方 / 手动价，AGY 按对应 API 模型参考价（Google / Anthropic 官方价）；缓存与长上下文按供应商规则，金额仅含已定价部分，非订阅扣款或官方固定额度。</p>
+<section class="metrics capacity-metrics" aria-label="11月9日起本机全部已记录用量">
+<article class="metric"><p class="metric-label">11/09 起总 Token</p><strong class="metric-number" id="capacity-total">—</strong><p class="metric-note" id="capacity-total-note">输入 + 输出，包含未归属调用</p></article>
+<article class="metric"><p class="metric-label">输入 / 缓存输入</p><strong class="metric-number" id="capacity-input">—</strong><p class="metric-note" id="capacity-cached">缓存已包含在输入中</p></article>
+<article class="metric"><p class="metric-label">输出 Token</p><strong class="metric-number" id="capacity-output">—</strong><p class="metric-note">已包含推理，不重复累加</p></article>
+<article class="metric cost-metric"><p class="metric-label">API 等价估算</p><strong class="metric-number" id="capacity-money">—</strong><p class="metric-note" id="capacity-unpriced">逐请求按模型和上下文计价</p></article>
+</section>
+<div class="statusline"><span id="capacity-status" role="status">正在读取观察数据…</span><span>起止按本机观察时间</span></div><p class="alert" id="capacity-error" role="alert" hidden></p>
+<section id="capacity-accounts" class="capacity-accounts" aria-label="各平台账号额度窗口测算"></section>
+<section class="panel capacity-method"><p class="section-kicker">HOW TO READ THIS</p><h2>已记录，和预计满额。</h2><p>历史用量编号表示调用当时的账号槽位；同编号不代表同一身份。账号身份变化会另起观察段，不把旧身份样本当作新身份容量。</p><p>“已观察”只累计两次额度快照之间、能核对账号身份的日志。首次中途接入不会补出之前消耗；11/09 起已有日志单独保留在累计用量里。</p><p>额度下降至少 20 个百分点、至少 5 次请求且数据对齐后，才显示“按当前组合推算满额”。模型、缓存、推理和工作内容改变都会影响结果；近期样本范围是经验范围。</p><p>用券、额度恢复、账号变化、服务重启或长时间观察中断会另起观察段。未归属、边界请求、未知价格或日志未同步时，先保留已观察数字，等待可用样本。</p><p>额度快照随原有后台查询自动保存，不额外发起模型或用券请求。页面暂停或隐藏时不发起新的日志同步，已提交同步仍会跟踪完成。</p></section>
+</main><footer class="page-footer"><span>LOCAL OBSERVATIONS · NO EXTRA MODEL CALLS</span><a href="/usage">查看原始调用与日期筛选 ↗</a></footer>
+</div></body></html>

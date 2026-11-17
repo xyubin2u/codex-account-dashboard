@@ -1,0 +1,182 @@
+/* Keep the account overview short; expose configuration on demand. */
+.shell{padding:0 28px}
+.masthead{height:52px}
+.wordmark{font-size:13px;gap:9px}
+.brand-icon{font-size:27px}
+.hero{padding:13px 0 15px}
+.hero-copy{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.eyebrow{display:none}
+h1{font-size:25px;letter-spacing:-.8px;line-height:1.3}
+.intro{font-size:11px;margin:0}
+.account-count{flex-direction:row;align-items:center;gap:9px}
+.count-number{font-size:36px;letter-spacing:-2px}
+.count-caption{margin:0;font-size:9px}
+.toolbar{position:sticky;top:0;z-index:2;background:var(--paper);padding:10px 0;margin-bottom:10px;gap:12px;flex-wrap:wrap}
+.summary{gap:16px}
+.summary-item{font-size:11px}
+.summary-item strong{font-size:14px}
+.actions{gap:16px;flex-wrap:wrap}
+.names-control{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);white-space:nowrap;cursor:pointer}
+.names-control input{margin:0;width:14px;height:14px;accent-color:var(--green);cursor:pointer}
+.names-control input:focus-visible{outline:2px solid #80a98e;outline-offset:3px}
+.sort-control{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.sort-control select{max-width:none;background:var(--mint);border-radius:5px;padding:6px 8px;font-size:11px}
+.auto-control{font-size:11px}
+.auto-control select{max-width:205px;font-size:10px}
+.activity-summary{margin:0 0 10px;padding:0 2px;font-size:10px;color:var(--green)}
+.account-card.in-use{border-color:#8cae91;box-shadow:inset 3px 0 0 #22634b}
+.usage-indicator{color:var(--green);font-size:9px;white-space:nowrap;display:block;line-height:14px}
+.usage-indicator[hidden]{display:none}
+.button.primary{padding:7px 12px;font-size:11px}
+.network-toolbar{padding:7px 12px;margin:0 0 10px;gap:6px 18px;font-size:11px}
+.network-toolbar select{padding:5px 7px;font-size:11px}
+.network-toolbar p{display:none}
+.batch-threshold{padding:0;margin-bottom:12px;border-radius:8px;box-shadow:none}
+.batch-summary{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:11px;color:var(--green);list-style:none}
+.batch-summary::-webkit-details-marker,.account-settings>summary::-webkit-details-marker{display:none}
+.batch-summary::before,.account-settings>summary::before{content:'›';display:inline-block;font:18px/1 var(--mono);color:#788b72;transition:transform .15s}
+details[open]>.batch-summary::before,.account-settings[open]>summary::before{transform:rotate(90deg)}
+.batch-summary small{margin-left:auto;font-size:10px;font-weight:400;color:var(--muted)}
+.batch-body{padding:12px 16px 16px;border-top:1px solid var(--line)}
+.batch-heading{margin-bottom:12px}
+.batch-heading h2{font-size:15px}
+.accounts-grid{gap:12px;align-items:start}
+.account-card{padding:13px 14px 9px;border-radius:8px}
+.card-header{margin-bottom:11px;gap:7px}
+.account-heading{gap:8px;min-width:0;flex:1}
+.letter{width:31px;height:31px;flex:0 0 31px;font-size:16px;border-radius:6px}
+.account-identity{min-width:0;flex:1}
+.account-name{font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-email{font:9px/14px var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-email[hidden]{display:none}
+.plan-info{display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin:-3px 0 9px;min-width:0;font-size:9px;line-height:16px;color:#788572}
+.plan-info>[data-field=plan-name]{white-space:nowrap}
+.plan-info>[data-field=plan-expiry]{font:9px/16px var(--mono);color:#536b4d;text-align:right}
+.plan-info.record-near,.plan-info.record-past{padding:4px 6px;margin-top:-2px;border:1px solid #e1b85d;border-left-width:3px;border-radius:5px;background:#fff1d6;align-items:center}
+.plan-info.record-near>[data-field=plan-expiry]{color:#975a08;font-weight:700}
+.plan-info.record-past{background:var(--red-light);border-color:#d1978d}
+.plan-info.record-past>[data-field=plan-expiry]{color:var(--red);font-weight:700}
+.subscription-updated{font-size:9px;color:var(--muted);margin:8px 6px 0}
+.subscription-edit{font-size:10px;padding:5px 9px;margin:9px 6px 0;color:var(--green)}
+.subscription-dialog>label{display:block;font-size:12px;font-weight:600;margin-top:16px}
+.subscription-dialog>input{display:block;width:100%;min-width:0;margin:8px 0 10px;padding:10px 12px;border:1px solid #b6c8b0;border-radius:6px;background:#fff;color:var(--ink);font:14px var(--mono);box-sizing:border-box}
+.subscription-dialog .subscription-account{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.subscription-dialog #subscription-help{font-size:12px;color:var(--muted)}
+.subscription-dialog .subscription-error{color:var(--red);font-size:12px;min-height:0;margin:8px 0 0}
+.subscription-restore-row{border-top:1px solid var(--line);padding-top:13px;margin-top:15px}
+.subscription-restore-row .button{font-size:11px;color:var(--muted)}
+.state-badge{font-size:9px;flex-shrink:0}
+.quota-windows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.quota-window+.quota-window{margin:0;border-left:1px solid #e6e9df;padding-left:12px}
+.quota-window:first-child{padding-right:12px}
+.window-row{gap:4px;margin-bottom:6px;min-height:27px}
+.window-name{font-size:10px;white-space:nowrap}
+.window-name small{font-size:8px;margin-left:3px;letter-spacing:0}
+.percentage{font-size:24px;letter-spacing:-1.2px}
+.percentage small{font-size:10px}
+.percentage.unknown{font-size:21px}
+.percentage.not-applicable{font:500 12px/1.4 var(--sans);letter-spacing:0;color:var(--green)}
+.quota-window.not-applicable .quota-progress{visibility:hidden}
+.quota-progress{height:5px}
+.reset{flex-direction:column;gap:0;line-height:16px;margin-top:4px;font-size:9px;min-height:32px}
+.card-notice{margin-top:7px;padding:4px 7px;font-size:10px;line-height:1.6;min-height:0}
+.card-notice[hidden]{display:none}
+.card-notice span[hidden]{display:none}
+.credit-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:0 5px;margin-top:8px;padding:9px 0 7px;border-bottom:0}
+.credit-heading{justify-content:flex-start;gap:6px;font-size:10px;flex-wrap:wrap}
+.credit-heading small{display:none}
+.credit-heading strong{font-size:10px;white-space:nowrap}
+.credit-actions{grid-column:2;grid-row:1;gap:4px;flex-wrap:nowrap}
+.credit-actions .button{flex:none;padding:4px 6px;font-size:10px;border-radius:5px}
+.credit-controls>p{grid-column:1/-1;grid-row:2;font-size:9px;line-height:1.6;margin:4px 0 0}
+.credit-resolve{grid-column:1/-1;grid-row:3;justify-self:end;margin-top:5px;padding:4px 6px;font-size:10px}
+.credit-resolve[hidden]{display:none}
+.account-settings{border-top:1px solid var(--line)}
+.account-settings>summary{display:flex;align-items:center;gap:7px;list-style:none;cursor:pointer;min-height:28px;font-size:10px;color:#65765e}
+.account-settings>summary::before{font-size:15px}
+.account-mode{font-size:9px;letter-spacing:0;color:var(--green);white-space:nowrap}
+.settings-thresholds{margin-left:auto;font:9px var(--mono);color:#8a9282;white-space:nowrap}
+.account-settings-body{padding:1px 0 8px}
+.account-settings-body .pool-control{margin-top:3px;padding:8px 10px;font-size:11px}
+.account-settings-body .threshold-control{padding:8px 6px 2px}
+.account-settings-body .credit-updated{font-size:9px;color:var(--muted);margin:8px 6px 0}
+summary:focus-visible{outline:2px solid #80a98e;outline-offset:3px;border-radius:3px}
+.card-bottom{margin-top:0;padding-top:6px;gap:5px}
+.last-update{font-size:0}
+.last-update span{display:inline;font-size:9px;line-height:1.5}
+.refresh-one{padding:3px 0 3px 7px;font-size:10px}
+.page-footer{font-size:10px;margin-top:14px}
+.reading-note{margin-top:16px;padding:12px 0 18px;font-size:10px}
+.credit-dialog p{overflow-wrap:anywhere}
+/* Quota availability uses 30% for 5H and 20% for weekly; active-use stays separate. */
+.quota-legend{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin:0 0 12px}
+.quota-legend-counts{display:flex;gap:7px;flex-wrap:wrap}
+.quota-chip{display:inline-flex;align-items:center;gap:7px;border:1px solid;border-radius:6px;padding:5px 9px;font-size:11px;font-weight:600;line-height:1.5}
+.quota-chip strong{font:700 15px var(--mono)}
+.quota-chip.ready{background:#d9f3e5;border-color:#88cba6;color:#14613a}
+.quota-chip.low{background:#fbe1de;border-color:#e0a098;color:#a12c23}
+.quota-chip.pending{background:#eeefe9;border-color:#cfd3c8;color:#687064}
+.quota-legend p{margin:0;color:#576352;font-size:11px}
+.quota-legend p span{display:block;color:var(--muted);font-size:10px}
+.account-card[data-quota-state]{border-width:2px;transition:background .2s,border-color .2s}
+.account-card[data-quota-state=ready]{background:#effaf3;border-color:#58ad7c;box-shadow:inset 0 4px 0 #269957,0 2px 8px #1b59370a}
+.account-card[data-quota-state=low],.account-card[data-quota-state=exhausted]{background:#fff1ef;border-color:#d87366;box-shadow:inset 0 4px 0 #c34739,0 2px 8px #8c21170a}
+.account-card[data-quota-state=pending]{background:#f8f8f3;border-color:#ccd0c4;box-shadow:inset 0 4px 0 #a8ae9e}
+.account-card[data-quota-state] .state-badge{font-size:11px;font-weight:700;padding:3px 7px;border-radius:5px;background:#e9ece3;line-height:1.5}
+.account-card[data-quota-state=ready] .state-badge{color:#fff;background:#197845}
+.account-card[data-quota-state=low] .state-badge,.account-card[data-quota-state=exhausted] .state-badge{color:#fff;background:#b53b2f}
+.account-card[data-quota-state=ready] .letter{background:#d4efde;border-color:#88cba6;color:#14613a}
+.account-card[data-quota-state=low] .letter,.account-card[data-quota-state=exhausted] .letter{background:#f9dcd7;border-color:#e0a098;color:#a12c23}
+.percentage.sufficient{color:#177343}
+.percentage.critical{color:#b52e23}
+.quota-progress.critical{accent-color:#c34739}
+.quota-progress.critical::-webkit-progress-value{background:#c34739}
+.quota-progress.critical::-moz-progress-bar{background:#c34739}
+.account-card[data-quota-state=pending] .percentage.sufficient,.account-card[data-quota-state=pending] .percentage.critical{color:#72796b}
+.account-card[data-quota-state=pending] .quota-progress{accent-color:#a2aa98}
+.account-card[data-quota-state=pending] .quota-progress::-webkit-progress-value{background:#a2aa98}
+.account-card[data-quota-state=pending] .quota-progress::-moz-progress-bar{background:#a2aa98}
+.account-card[data-quota-state] .card-notice.failed{background:#f9ddd8;color:#9c2d24}
+.account-card.in-use .usage-indicator{background:#e0eddd;border:1px solid #94b68e;border-radius:4px;padding:1px 5px;font-weight:600;margin-top:3px}
+.card-state{flex-shrink:0;display:flex;flex-direction:column;align-items:flex-end}
+@media(max-width:1150px){
+  .shell{padding:0 24px;max-width:none}
+  .account-card{padding:14px 16px 10px}
+  .hero-copy{gap:5px 14px}
+}
+@media(max-width:620px){
+  .shell{padding:0 14px}
+  .masthead{height:48px}
+  .wordmark{font-size:11px;gap:6px}
+  .connection{font-size:9px}
+  .hero{padding:13px 0}
+  .hero-copy{display:block}
+  h1{font-size:23px;letter-spacing:-.7px}
+  .mobile-break{display:none}
+  .intro{font-size:10px;line-height:1.7;margin:4px 0 0;max-width:none}
+  .account-count{display:none}
+  .toolbar{gap:8px;padding:9px 0;align-items:stretch}
+  .summary{gap:12px}
+  .summary-item{font-size:10px}
+  .actions{gap:6px 10px;justify-content:space-between}
+  .sort-control{font-size:10px}
+  .sort-control select{font-size:10px;max-width:161px}
+  .auto-control{gap:3px;font-size:10px}
+  .auto-control select{padding:4px 0;font-size:10px;max-width:194px}
+  .actions .button.primary{padding:6px 9px;font-size:10px}
+  .network-toolbar{padding:7px 10px;gap:5px}
+  .network-toolbar label{width:100%;justify-content:space-between}
+  .network-toolbar select{max-width:205px}
+  #network-status{font-size:10px}
+  .batch-summary small{font-size:9px}
+  .accounts-grid{grid-template-columns:1fr;gap:10px}
+  .account-card{padding:12px 13px 8px}
+  .card-header{margin-bottom:10px}
+  .percentage{font-size:26px}
+  .quota-window+.quota-window{margin:0}
+  .reset{font-size:10px}
+  .credit-controls>p{font-size:10px}
+  .card-notice{font-size:10px}
+  .last-update span{font-size:9px}
+  .page-footer{font-size:9px;gap:4px}
+}

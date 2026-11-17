@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#22634b">
+  <title>用量统计 · 账户看板</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20261107">
+  <link rel="stylesheet" href="/usage.css">
+  <script src="/usage.js" defer></script>
+  <link rel="stylesheet" href="/navigation.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead dashboard-header"><a class="wordmark" href="/" aria-label="账户看板首页"><span class="brand-icon" aria-hidden="true">⌁</span><span>账户看板</span></a><nav class="dashboard-nav" aria-label="看板导航"><a href="/">账户额度</a><a href="/usage" aria-current="page">用量统计</a><a href="/capacity">额度测算</a></nav></header>
+    <main>
+      <div class="platform-picker" role="group" aria-label="统计平台"><button type="button" data-platform="gpt" aria-pressed="false">GPT</button><button type="button" data-platform="agy" aria-pressed="false">AGY</button><button type="button" data-platform="all" aria-pressed="true">合并</button></div>
+      <section class="hero" aria-labelledby="page-title">
+        <div><p class="eyebrow">A LOCAL RECORD OF YOUR WORK</p><h1 id="page-title">每次调用，都有迹可循。</h1><p class="intro">本机调用的 Token、缓存与参考成本。</p></div>
+        <div class="live-indicator" id="live-indicator"><span class="status-dot" aria-hidden="true"></span><span id="live-label">实时同步</span><small>LOCAL ONLY</small></div>
+      </section>
+
+      <p class="platform-scope" id="platform-scope">GPT + AGY · 按平台分别核对账号</p>
+      <section class="filterbar" aria-label="统计筛选与实时操作">
+        <div class="range-control" role="group" aria-label="时间范围">
+          <button type="button" data-range="today" aria-pressed="true">今日</button><button type="button" data-range="yesterday" aria-pressed="false">昨日</button><button type="button" data-range="7d" aria-pressed="false">7 天</button><button type="button" data-range="30d" aria-pressed="false">30 天</button><button type="button" data-range="365d" aria-pressed="false">一年</button><button type="button" data-range="all" aria-pressed="false">全部</button>
+        </div>
+        <label class="model-control" for="model-filter">模型<select id="model-filter"><option value="all">全部模型</option></select></label>
+        <label class="model-control account-control" for="account-filter">账号<select id="account-filter"><option value="all">全部账号</option><option value="unknown">未归属</option></select></label>
+        <div class="sync-actions"><button type="button" class="button" id="live-toggle" aria-pressed="true"><span id="live-toggle-icon" aria-hidden="true">Ⅱ</span><span id="live-toggle-label">暂停实时</span></button><button type="button" class="button primary" id="sync-now"><span aria-hidden="true">↻</span><span id="sync-label">立即同步</span></button></div>
+      </section>
+      <form class="date-filter" id="date-filter" aria-label="自选调用日期"><label for="date-start">开始日期<input type="date" id="date-start" min="2026-11-09" required></label><span aria-hidden="true">—</span><label for="date-end">结束日期<input type="date" id="date-end" min="2026-11-09" required></label><button type="submit" class="button" id="apply-dates">按日期查看</button><span class="date-note" id="date-note">默认 11/09 至今天，包含首尾日期。</span></form>
+      <div class="statusline"><span id="sync-status" role="status">正在读取本机用量…</span><span id="timezone-label"></span></div>
+      <div class="alert" id="service-alert" role="alert" hidden></div>
+
+      <section class="metrics" aria-label="所选范围用量概览" aria-busy="true" id="metrics">
+        <article class="metric"><p class="metric-label">已记录请求 <span>REQUESTS</span></p><strong class="metric-number" id="stat-requests">—</strong><p class="metric-note" id="stat-sessions">等待日志数据</p></article>
+        <article class="metric"><p class="metric-label">总 Token <span>TOKENS</span></p><strong class="metric-number" id="stat-total">—</strong><p class="metric-note" id="stat-total-note">输入 + 输出</p></article>
+        <article class="metric"><p class="metric-label">新增输入 <span>INPUT</span></p><strong class="metric-number" id="stat-input">—</strong><p class="metric-note" id="stat-cache">缓存命中 —</p></article>
+        <article class="metric"><p class="metric-label">输出 Token <span>OUTPUT</span></p><strong class="metric-number" id="stat-output">—</strong><p class="metric-note" id="stat-reasoning">含推理 —</p></article>
+        <article class="metric cache-metric"><p class="metric-label">缓存命中率 <span>CACHE HIT</span></p><strong class="metric-number" id="stat-cache-rate">—</strong><p class="metric-note">缓存读取 ÷ 全部输入</p></article>
+        <article class="metric cost-metric"><p class="metric-label">参考成本 <span>ESTIMATE</span></p><strong class="metric-number" id="stat-cost">—</strong><p class="metric-note" id="stat-unpriced">非订阅扣款 · 对应 API 模型参考价</p></article>
+      </section>
+
+      <p class="cost-basis" id="cost-basis">合并显示 GPT 与 AGY；GPT 按 OpenAI 官方 / 手动价，AGY 按对应 API 模型参考价（Google / Anthropic 官方价）；缓存与长上下文按各供应商规则。仅汇总已定价部分，非订阅扣款或实际账单。</p>
+
+      <section class="panel records-panel" aria-labelledby="records-title">
+        <div class="panel-heading records-heading"><div><p class="section-kicker">LIVE ACTIVITY</p><h2 id="records-title">调用记录 <span class="count-tag" id="records-count">—</span></h2></div><div class="records-meta"><span class="new-records" id="new-records" aria-live="polite"></span><span class="subtle">新记录在上 · 点击行查看明细</span></div></div>
+        <div class="table-scroll" id="records-scroll" tabindex="0" aria-label="调用记录表，可横向与纵向滚动">
+          <table class="records-table"><thead><tr><th scope="col">时间</th><th scope="col">应用</th><th scope="col">账号</th><th scope="col">供应商</th><th scope="col">模型</th><th scope="col" class="numeric" title="输入 Token 减去缓存读取与写入">新增输入</th><th scope="col" class="numeric">输出</th><th scope="col" class="numeric">缓存命中</th><th scope="col" class="numeric" title="缓存读取 Token ÷ 全部输入 Token；零输入时未知">命中率</th><th scope="col" class="numeric">参考成本</th><th scope="col" class="numeric" title="包含等待时间的日志估算速度，不是模型纯生成速度">≈ 速度 <span class="help-mark" aria-hidden="true">?</span></th></tr></thead><tbody id="records-body"><tr class="empty-row"><td colspan="11"><span class="empty-icon" aria-hidden="true">⌁</span><strong>正在读取用量</strong><span>首次扫描会随进度逐步显示记录。</span></td></tr></tbody></table>
+        </div>
+        <div class="records-footer"><p id="records-note">仅计入本机日志已写出用量的请求。</p><nav class="pagination" aria-label="调用记录分页"><button class="button page-button" type="button" id="page-prev" aria-label="上一页" disabled>←</button><span id="page-label">第 1 页</span><button class="button page-button" type="button" id="page-next" aria-label="下一页" disabled>→</button></nav></div>
+      </section>
+
+      <section class="panel accounts-panel" aria-labelledby="accounts-title"><div class="panel-heading"><div><p class="section-kicker">BY ACCOUNT</p><h2 id="accounts-title">账号汇总</h2></div><span class="accounts-scope">按时间与模型 · 保留全部账号比较</span></div><div class="account-table-scroll" tabindex="0" aria-label="账号汇总表，可横向滚动"><table class="account-table"><thead><tr><th scope="col">账号 / 请求</th><th scope="col" class="numeric">Token</th><th scope="col" class="numeric">缓存率</th><th scope="col" class="numeric">参考成本</th></tr></thead><tbody id="accounts-body"><tr><td colspan="4" class="model-empty">正在读取账号用量…</td></tr></tbody></table></div><div class="account-notes"><p>编号表示调用当时的账号槽位；同编号不代表同一身份。移除或重新添加账号后，历史用量仍保留原编号。</p><p id="account-coverage">等待归属统计</p><p id="attribution-status" role="status">仅实际观察到的新写入用量可核对账号；旧历史无法反推，未归属不分摊。</p></div></section>
+
+      <div class="analysis-grid">
+        <section class="panel trend-panel" aria-labelledby="trend-title"><div class="panel-heading"><div><p class="section-kicker">THE SHAPE OF YOUR WORK</p><h2 id="trend-title">用量趋势</h2></div><div class="metric-control" role="group" aria-label="趋势指标"><button type="button" data-metric="total_tokens" aria-pressed="true">Token</button><button type="button" data-metric="requests" aria-pressed="false">请求</button><button type="button" data-metric="estimated_cost_usd" aria-pressed="false">参考成本</button></div></div><p class="chart-caption" id="trend-caption">所选时间范围 · 总 Token</p><div id="trend-chart" class="trend-chart" role="img" aria-label="等待用量趋势数据"></div></section>
+        <section class="panel model-panel" aria-labelledby="models-title"><div class="panel-heading"><div><p class="section-kicker">BY MODEL</p><h2 id="models-title">模型汇总</h2></div><button class="button text-button" type="button" id="open-pricing">设置单价 <span aria-hidden="true">↗</span></button></div><div class="model-table-scroll"><table class="model-table"><thead><tr><th scope="col">模型 / 请求</th><th scope="col" class="numeric">Token</th><th scope="col" class="numeric">缓存率</th><th scope="col" class="numeric">参考成本</th></tr></thead><tbody id="models-body"><tr><td colspan="4" class="model-empty">正在读取模型用量…</td></tr></tbody></table></div><p class="panel-footnote" id="model-cost-note">单价以 USD / 百万 Token 设置。</p></section>
+      </div>
+
+      <section class="panel heatmap-panel" aria-labelledby="heatmap-title"><div class="panel-heading"><div><p class="section-kicker">A YEAR, ONE DAY AT A TIME</p><h2 id="heatmap-title">使用足迹</h2></div><span class="heatmap-total" id="heatmap-total">近一年</span></div><p class="chart-caption">近一年 · 按请求数着色 · 跟随模型与账号筛选，不受上方时间范围影响</p><div class="heatmap-scroll" id="heatmap-scroll" tabindex="0" aria-label="近一年每日使用热力图，可横向滚动"><div id="heatmap-chart" role="img" aria-label="等待近一年使用数据"></div></div><div class="heatmap-footer"><span id="heatmap-dates">每个方格代表一天，悬停查看数字。</span><div class="heatmap-legend" aria-label="颜色越深请求越多"><span>少</span><i class="heat-0"></i><i class="heat-1"></i><i class="heat-2"></i><i class="heat-3"></i><i class="heat-4"></i><span>多</span></div></div></section>
+
+      <details class="reading-note"><summary>这些数字如何计算？</summary><div><p>仅统计<strong>本机已写出用量的请求</strong>，不代表全部请求或全部失败请求。账号由本机运行进程核对：启用观察后，实际观察到的新写入用量才可归属。旧历史无法反推，缺证或存在冲突的请求保留“未归属”，不会分摊给任何账号。账号汇总跟随时间与模型，保留全部账号用于比较。</p><p>输入 Token 已包含缓存命中；“新增输入”扣除缓存读取与缓存写入。推理 Token 已包含在输出中，均不重复叠加。缓存命中率为缓存读取 ÷ 全部输入，零输入时显示未知。缓存写入与各项原始计数可点行查看。</p><p>速度为包含等待时间的日志估算，不等于模型纯生成速度。GPT 参考成本默认按 OpenAI Standard API 美元参考价估算，已核 2026-11-09；有长上下文价时按每次输入量自动切换。缓存写入以 30m 价格参考，不含 Fast、区域及工具费用；手动价以设置为准。AGY 按对应 API 模型参考价（Google / Anthropic 官方价），别名按对应 API 模型估算；缓存与长上下文按各供应商规则，缺价保留未定价；合并金额仅含已定价部分。<strong>不是订阅扣款或实际账单</strong>；未设置价格显示“未定价”，部分定价仅汇总已定价部分。</p><p>页面可见时约每 2 秒扫描一次新增日志；暂停实时或切到后台后停止自动同步。这里不展示对话正文、项目目录或邮箱。</p></div></details>
+      <footer class="page-footer"><span><span class="footer-mark" aria-hidden="true">↳</span> 本机统计，不向外部服务发送日志。</span><span id="footer-updated">尚未同步</span></footer>
+    </main>
+  </div>
+
+  <dialog class="usage-dialog detail-dialog" id="record-dialog" aria-labelledby="record-dialog-title"><div class="dialog-heading"><div><p class="section-kicker">REQUEST DETAIL</p><h2 id="record-dialog-title">调用明细</h2></div><button type="button" class="close-button" id="close-record" aria-label="关闭调用明细">×</button></div><p class="dialog-subtitle" id="record-subtitle"></p><dl class="detail-grid" id="record-detail"></dl><p class="dialog-note">输入含缓存，输出含推理；不重复相加。成本为参考估算，速度包含等待。</p><div class="dialog-actions"><button class="button primary" type="button" id="record-done">关闭明细</button></div></dialog>
+
+  <dialog class="usage-dialog" id="pricing-dialog" aria-labelledby="pricing-title" aria-describedby="pricing-help"><div class="dialog-heading"><div><p class="section-kicker">YOUR REFERENCE RATES</p><h2 id="pricing-title">模型参考单价</h2></div><button type="button" class="close-button" id="close-pricing" aria-label="关闭单价设置">×</button></div><p class="dialog-subtitle" id="pricing-help">单位：USD / 百万 Token。仅用于本机成本估算。</p><label class="field-label" for="pricing-model">选择模型</label><select class="pricing-model" id="pricing-model"><option value="">暂无模型</option></select><div class="pricing-source" id="pricing-source" role="status"></div><p class="pricing-rule" id="pricing-rule"></p><div class="pricing-long-context" id="pricing-long-context" hidden></div><div class="pricing-fields"><label for="price-input">新增输入<input type="number" id="price-input" min="0" step="any" inputmode="decimal" placeholder="未设置" autocomplete="off"><small>不含缓存读取与写入</small></label><label for="price-cached">缓存命中<input type="number" id="price-cached" min="0" step="any" inputmode="decimal" placeholder="未设置" autocomplete="off"><small>缓存读取单价</small></label><label for="price-write">缓存写入<input type="number" id="price-write" min="0" step="any" inputmode="decimal" placeholder="未设置" autocomplete="off"><small id="price-write-help">按日志中的缓存写入量</small></label><label for="price-output">输出<input type="number" id="price-output" min="0" step="any" inputmode="decimal" placeholder="未设置" autocomplete="off"><small>已含推理输出</small></label></div><p class="dialog-note">请填完整四项。明确填 0 表示该项参考单价为 0；留空不会被当作免费。保存后作为手动统一价，替代官方长上下文规则并重新估算历史与新记录。</p><p class="form-error" id="pricing-error" role="alert"></p><div class="dialog-actions"><button class="button text-button" type="button" id="clear-pricing">恢复未定价</button><button class="button primary" type="button" id="save-pricing">保存单价</button></div></dialog>
+  <noscript><p class="noscript">请启用 JavaScript 以读取本机用量统计。</p></noscript>
+</body>
+</html>
