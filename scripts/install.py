@@ -50,6 +50,23 @@ def main(argv=None):
     managed=destination/'.installed-files'
     if (destination/'core.py').exists() and not managed.exists():
         raise ValueError('目标已有手工管理的安装；请保留原目录并在独立用户下安装公开版。')
+    # prepare() links only existing shared state. A fresh machine must have
+    # the rollout root before its first profile starts, so native sessions
+    # stay inside the exact-owner observer's shared root from the first task.
+    base=home/'.codex'
+    for name in ('sessions','thread-writer-locks'):
+        shared=base/name
+        if shared.is_symlink() or shared.exists() and not shared.is_dir():
+            raise ValueError('共享会话目录类型异常，未修改已有记录。')
+        shared.mkdir(mode=0o700,exist_ok=True)
+    for name in ('history.jsonl','session_index.jsonl'):
+        shared=base/name
+        if shared.is_symlink():raise ValueError('共享历史文件类型异常，未修改已有记录。')
+        try:
+            fd=os.open(shared,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+            os.close(fd)
+        except FileExistsError:
+            if not shared.is_file():raise ValueError('共享历史文件类型异常，未修改已有记录。')
     for relative in entries:
         target=destination/relative
         for parent in (target,*target.parents):
